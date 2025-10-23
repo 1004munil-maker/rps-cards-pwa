@@ -1,9 +1,9 @@
 /* =========================================================
-   RPS Cards — app.js（安定版フル / 最小変更）
-   - 同マス重なり表示の明瞭化（左右オフセット）
-   - G/C/P 合計15枚ランダム配布（各最低2）
-   - アイテム合計4枚をランダム配布（WIN/SWAP/BARRIER、重複OK）
-   - ロビー中はタイマー無効（音も鳴らない）
+   RPS Cards — app.js（安定版フル / 結果3秒表示＆演出強化）
+   - カウントダウンと結果オーバーレイを分離（即閉じる不具合を修正）
+   - 結果はきっちり3秒表示（RESULT_SHOW_MS）
+   - 次ラウンド遷移も3秒に同期＆ロック解放がスムーズ
+   - 既存のゲームロジックは最小変更で維持
    ========================================================= */
 
 /* [01] モバイル対策 */
@@ -108,11 +108,13 @@ if (playerName && btnCreate && btnJoin) {
   });
 }
 
-/* [05] 定数（★ここだけ仕様変更） */
+/* [05] 定数（仕様） */
 const BOARD_SIZE = 20;
 const MIN_ROUNDS = 8;
-const TURN_TIME  = 10_000; // ms
-const REVEAL_MS  = 3000;   // ms
+const TURN_TIME  = 10_000;    // 1手の提出タイム
+const REVEAL_MS  = 3000;      // 提出後の「カウントダウン」演出
+const RESULT_SHOW_MS = 3000;  // 結果オーバーレイの表示時間（しっかり3秒）
+const COUNTDOWN_TICK_MS = 250;
 
 // G/C/P 合計 15、各最低 2
 const BASIC_TOTAL = 15;
@@ -131,10 +133,11 @@ let roundLocked = false;
 
 let curRoom = null;
 let overlayShownRound = 0;
-let revealApplyPoller = null;  // p1: 演出終了監視＆結果適用
-let countdownTicker = null;    // 両端末: 3,2,1 表示更新
-let overlayTimerId = null;
-let resultOverlayEl = null;
+let revealApplyPoller = null;   // p1: 演出終了監視＆結果適用
+let countdownTicker = null;     // 両端末: 3,2,1 表示更新
+let resultOverlayEl = null;     // 結果用
+let resultOverlayTimerId = null;
+let countdownOverlayEl = null;  // カウントダウン用
 
 /* [07] 初期描画（盤面） */
 makeBoard();
@@ -451,7 +454,7 @@ function renderGame(d){
 
   // 結果オーバーレイ（全端末）
   if (endedThisRound && overlayShownRound !== d.round){
-    showResultOverlay(makeRoundSummary(d.lastResult, meSeat), REVEAL_MS);
+    showResultOverlay(makeRoundSummary(d.lastResult, meSeat), RESULT_SHOW_MS);
     overlayShownRound = d.round;
   }
 
@@ -462,7 +465,7 @@ function renderGame(d){
     hideRematchOverlay();
   }
 
-  // 次ラウンドでオーバーレイが残らないよう掃除
+  // 次ラウンドで前の結果オーバーレイが残らないよう掃除（新ラウンドに切り替わった時だけ）
   if (!endedThisRound && !revealing && overlayShownRound !== d.round){
     hideResultOverlay();
   }
@@ -473,7 +476,6 @@ function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
   if (localTimer) clearInterval(localTimer);
   lastBeepSec = null;
 
-  // 追加：playing 以外は動かさない（待機中のビープ対策）
   if (roomData?.state !== "playing") { timerEl.textContent = "-"; return; }
 
   const ended = !!(roomData?.lastResult && roomData.lastResult._round === roomData.round);
@@ -594,8 +596,9 @@ async function settleTimeout(roomData){
 
   await applyResult(d, result);
   playResultSfx(result);
-  showResultOverlay(makeRoundSummary(result, seat), REVEAL_MS);
-  scheduleAutoNext(d);
+  hideCountdownOverlay(); // 念のため
+  showResultOverlay(makeRoundSummary(result, seat), RESULT_SHOW_MS);
+  scheduleAutoNext(d, RESULT_SHOW_MS);
 }
 function winByDefault(winnerSeat, card, d){
   const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
@@ -697,7 +700,7 @@ async function applyResult(d, r){
   });
 }
 
-function scheduleAutoNext(d){
+function scheduleAutoNext(d, waitMs = RESULT_SHOW_MS){
   if (seat !== "p1") return;
   setTimeout(async ()=>{
     const snap = await get(child(ref(db), `rooms/${roomId}`));
@@ -730,7 +733,7 @@ function scheduleAutoNext(d){
     roundLocked = false;
     selectedCard = null;
     hideResultOverlay();
-  }, REVEAL_MS);
+  }, waitMs);
 }
 
 /* [21] 盤面ヘルパ */
@@ -763,7 +766,7 @@ function placeTokens(p1, p2, size){
     t2.className = "token op";
     cells[idx2]?.appendChild(t2);
   }
-  // ★同マス重なり対処：左右にズラして必ず2色が見える
+  // 同マス重なり対処：左右にズラして必ず2色が見える
   if (idx1>=0 && idx1===idx2){
     const cell = cells[idx1];
     cell.style.position = "relative";
@@ -777,7 +780,6 @@ function placeTokens(p1, p2, size){
 /* [22] ユーティリティ（オーバーレイ/カウントダウン/ポーラー/再戦） */
 
 // ── ランダム配布 ───────────────────────────────
-// G/C/P を合計 BASIC_TOTAL でランダム配分（各最低 BASIC_MIN 保証）
 function randomBasicHand(){
   let rest = BASIC_TOTAL - BASIC_MIN*3;
   let g = BASIC_MIN, c = BASIC_MIN, p = BASIC_MIN;
@@ -786,7 +788,6 @@ function randomBasicHand(){
   g += add[0]; c += add[1]; p += add[2];
   return { G:g, C:c, P:p };
 }
-// アイテム4枚を WIN/SWAP/BARRIER にランダム配布（重複OK）
 function randomItems(total=4){
   const items = { WIN:0, SWAP:0, BARRIER:0 };
   const keys = ["WIN","SWAP","BARRIER"];
@@ -845,8 +846,8 @@ function prettyResult(r, seatKey){
 function clampN(x,n){ return Math.max(0, Math.min(n, x)); }
 function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
 
-// === 結果オーバーレイ ===
-function ensureOverlay(){
+// === 結果オーバーレイ（結果専用） ===
+function ensureResultOverlay(){
   if (resultOverlayEl) return resultOverlayEl;
   resultOverlayEl = document.createElement("div");
   Object.assign(resultOverlayEl.style, {
@@ -855,39 +856,82 @@ function ensureOverlay(){
     zIndex:"9999", backdropFilter:"blur(2px)"
   });
   const inner = document.createElement("div");
-  inner.id = "overlayInner";
+  inner.id = "overlayResultInner";
   Object.assign(inner.style, {
     background:"#fff", borderRadius:"16px", padding:"24px 28px",
     fontSize:"22px", textAlign:"center", minWidth:"260px",
-    boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700"
+    boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700",
+    transform:"scale(.96)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
   });
   resultOverlayEl.appendChild(inner);
   document.body.appendChild(resultOverlayEl);
   return resultOverlayEl;
 }
-function showResultOverlay(text, ms=REVEAL_MS){
-  const el = ensureOverlay();
-  const inner = el.querySelector("#overlayInner");
+function showResultOverlay(text, ms=RESULT_SHOW_MS){
+  const el = ensureResultOverlay();
+  const inner = el.querySelector("#overlayResultInner");
   inner.textContent = text;
-  inner.style.fontSize = "22px";
   el.style.display = "flex";
-  if (overlayTimerId) clearTimeout(overlayTimerId);
-  overlayTimerId = setTimeout(hideResultOverlay, ms);
+  // ポップ演出
+  requestAnimationFrame(()=>{
+    inner.style.transform = "scale(1)";
+    inner.style.opacity = "1";
+  });
+  if (resultOverlayTimerId) clearTimeout(resultOverlayTimerId);
+  resultOverlayTimerId = setTimeout(hideResultOverlay, ms);
 }
 function hideResultOverlay(){
   if (!resultOverlayEl) return;
-  resultOverlayEl.style.display = "none";
-  if (overlayTimerId) { clearTimeout(overlayTimerId); overlayTimerId = null; }
+  const inner = resultOverlayEl.querySelector("#overlayResultInner");
+  if (inner){
+    inner.style.transform = "scale(.96)";
+    inner.style.opacity = "0";
+  }
+  setTimeout(()=>{ resultOverlayEl.style.display = "none"; }, 180);
+  if (resultOverlayTimerId) { clearTimeout(resultOverlayTimerId); resultOverlayTimerId = null; }
 }
-function updateCountdownOverlay(){
-  if (!curRoom) return;
-  if (curRoom.revealRound !== curRoom.round) { hideResultOverlay(); return; }
-  const remain = Math.max(0, Math.ceil((curRoom.revealUntilMs - Date.now())/1000));
-  const el = ensureOverlay();
-  const inner = el.querySelector("#overlayInner");
-  inner.textContent = remain>0 ? `${remain}` : "0";
-  inner.style.fontSize = "64px";
-  el.style.display = "flex";
+
+// === カウントダウンオーバーレイ（提出後～判定までの数字表示） ===
+function ensureCountdownOverlay(){
+  if (countdownOverlayEl) return countdownOverlayEl;
+  countdownOverlayEl = document.createElement("div");
+  Object.assign(countdownOverlayEl.style, {
+    position:"fixed", inset:"0", background:"rgba(0,0,0,0.45)",
+    display:"none", alignItems:"center", justifyContent:"center",
+    zIndex:"9998", backdropFilter:"blur(2px)"
+  });
+  const inner = document.createElement("div");
+  inner.id = "overlayCountdownInner";
+  Object.assign(inner.style, {
+    background:"#fff", borderRadius:"16px", padding:"18px 24px",
+    fontSize:"64px", textAlign:"center", minWidth:"160px",
+    boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"900",
+    transform:"scale(.94)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
+  });
+  countdownOverlayEl.appendChild(inner);
+  document.body.appendChild(countdownOverlayEl);
+  return countdownOverlayEl;
+}
+function showCountdownOverlay(n){
+  const el = ensureCountdownOverlay();
+  const inner = el.querySelector("#overlayCountdownInner");
+  inner.textContent = `${n}`;
+  if (el.style.display!=="flex"){
+    el.style.display = "flex";
+    requestAnimationFrame(()=>{
+      inner.style.transform = "scale(1)";
+      inner.style.opacity = "1";
+    });
+  }
+}
+function hideCountdownOverlay(){
+  if (!countdownOverlayEl) return;
+  const inner = countdownOverlayEl.querySelector("#overlayCountdownInner");
+  if (inner){
+    inner.style.transform = "scale(.94)";
+    inner.style.opacity = "0";
+  }
+  setTimeout(()=>{ countdownOverlayEl.style.display = "none"; }, 180);
 }
 
 // ラウンド結果の要約（自分視点で対称表現）
@@ -920,30 +964,42 @@ function makeRoundSummary(r, mySeat){
   return "—";
 }
 
-// === ポーラー（p1の結果確定 / 両端末のカウントダウン表示 / 再戦合意監視） ===
+// === ポーラー（p1の結果確定 / 両端末カウントダウン表示 / 再戦） ===
 function ensurePollers(){
   // カウントダウン表示（両端末）
   if (!countdownTicker){
-    countdownTicker = setInterval(()=>{ if (curRoom) updateCountdownOverlay(); }, 250);
+    countdownTicker = setInterval(()=>{
+      if (!curRoom) return;
+      // ★「カウントダウンだけ」を更新。結果オーバーレイは一切触らない！
+      if (curRoom.state!=="playing" || curRoom.revealRound !== curRoom.round){
+        hideCountdownOverlay();
+        return;
+      }
+      const remain = Math.max(0, Math.ceil((curRoom.revealUntilMs - Date.now())/1000));
+      if (remain > 0) showCountdownOverlay(remain);
+      else hideCountdownOverlay();
+    }, COUNTDOWN_TICK_MS);
   }
-  // p1だけ：演出終了したら必ず結果を適用／再戦合意で再開
+
+  // p1だけ：演出終了→結果適用→結果3秒表示→次ラウンド
   if (seat === "p1" && !revealApplyPoller){
     revealApplyPoller = setInterval(async ()=>{
       if (!curRoom) return;
 
-      // 演出終了→判定適用
       if (curRoom.state==="playing"){
         const d = curRoom;
         const both = !!d.players.p1.choice && !!d.players.p2.choice;
         const revealing = (d.revealRound === d.round);
         const already = !!(d.lastResult && d.lastResult._round === d.round);
+
         if (both && revealing && !already && Date.now() >= d.revealUntilMs){
           const result = judgeRound(d.players.p1, d.players.p2);
           result._round = d.round;
           await applyResult(d, result);
           playResultSfx(result);
-          showResultOverlay(makeRoundSummary(result, seat), REVEAL_MS);
-          scheduleAutoNext(d);
+          hideCountdownOverlay(); // 数字は消す
+          showResultOverlay(makeRoundSummary(result, seat), RESULT_SHOW_MS); // ★ここが3秒
+          scheduleAutoNext(d, RESULT_SHOW_MS);
         }
       }
 
@@ -951,7 +1007,7 @@ function ensurePollers(){
       if (curRoom.state==="ended"){
         const v = curRoom.rematchVotes || {p1:false,p2:false};
         if (v.p1 && v.p2){
-          await startNewMatch(); // P1が一括リセット
+          await startNewMatch();
         }
       }
     }, 200);
@@ -960,7 +1016,6 @@ function ensurePollers(){
 
 /* === 再戦系 === */
 function showRematchOverlay(d){
-  // 既に表示していれば更新のみ
   let box = document.getElementById("rematchBox");
   if (!box){
     box = document.createElement("div");
@@ -1002,7 +1057,6 @@ async function voteRematch(){
   await update(ref(db, `rooms/${roomId}/rematchVotes`), { [key]: true });
 }
 async function startNewMatch(){
-  // 新しい手札もランダム・ポジション/ラウンド初期化
   await update(ref(db, `rooms/${roomId}`), {
     state: "playing",
     round: 1,
