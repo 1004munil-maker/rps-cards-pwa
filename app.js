@@ -15,15 +15,15 @@
    [11] ロビー購読（開始ボタンのガード付き）
    [12] ゲーム開始（サーバー側ガード）
    [13] 退出処理
-   [14] UIレンダリング（提出ロック・進行ガード・タイマー制御）
-   [15] 10秒タイマー（毎R再起動、結果後停止）
+   [14] UIレンダリング（提出ロック・演出・タイマー制御）
+   [15] 10秒タイマー（毎R再起動、結果/演出中は停止）
    [16] カード選択＆ヒント
    [17] 提出（多重提出防止・UIロック）
    [18] タイムアウト決着
    [19] ルール判定＆効果音
-   [20] 結果適用＆ラウンド遷移（オート進行）
+   [20] 結果適用→自動で次ラウンド（ホストのみ）
    [21] 盤面ヘルパ
-   [22] ユーティリティ
+   [22] ユーティリティ（オーバーレイ/カウントダウン等）
    ========================================================= */
 
 /* [01] モバイル対策（コピー/ズーム禁止・縦固定） */
@@ -52,7 +52,7 @@ class SFX {
     osc.start(t0); osc.stop(t0+attack+dur+release+0.01);
   }
   click(){ this.tone({freq:900,dur:0.03,type:'square',gain:0.04}); }
-  play(){ this.tone({freq:660,dur:0.06,type:'triangle',gain:0.05}); } // ←dur=0.06 は '=' だとエラーになるので修正
+  play(){ this.tone({freq:660,dur:0.06,type:'triangle',gain:0.05}); }
   win(){ this.tone({freq:740,dur:0.09,type:'sine',gain:0.06}); setTimeout(()=>this.tone({freq:880,dur:0.09}),90); }
   lose(){ this.tone({freq:200,dur:0.12,type:'sawtooth',gain:0.05}); }
   swap(){ this.tone({freq:520,dur:0.06}); setTimeout(()=>this.tone({freq:420,dur:0.06}),70); }
@@ -69,7 +69,7 @@ const sfx = new SFX();
 /* [03] Firebase 初期化（CDN） */
 const { initializeApp, getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove } = window.FirebaseAPI;
 
-// ★ あなたの firebaseConfig（動作重視で直入れ）
+// ★ あなたの firebaseConfig（動作優先で直入れ）
 const firebaseConfig = {
   apiKey: "AIzaSyBfrZSzcdCazQii03POnM--fRRMOa5LEs0",
   authDomain: "rps-cards-pwa.firebaseapp.com",
@@ -113,7 +113,7 @@ const opChoiceEl = $("#opChoice");
 const resultText = $("#resultText");
 const btnPlay    = $("#btnPlay");
 const btnClear   = $("#btnClear");
-const btnNext    = $("#btnNext"); // 今は未使用（自動進行）
+const btnNext    = $("#btnNext"); // 自動進行なので未使用
 const btnExit    = $("#btnExit");
 
 const cardBtns   = [...document.querySelectorAll(".cardBtn")];
@@ -134,6 +134,7 @@ if (playerName && btnCreate && btnJoin) {
 const BOARD_SIZE = 25;
 const MIN_ROUNDS = 8;
 const TURN_TIME  = 10_000; // ms
+const REVEAL_MS  = 3000;   // 演出の3秒
 const HAND_INIT  = { G:4, C:4, P:4, WIN:1, SWAP:1, BARRIER:1 };
 
 /* [06] 状態（提出ロック/演出タイマ含む） */
@@ -147,10 +148,11 @@ let localTimer = null;
 let lastBeepSec = null;
 let roundLocked = false;
 
-let advanceLockRound = 0;     // このラウンドの自動進行を1回だけにする
-let autoNextTimerId   = null; // 3秒アニメ後の次ラウンド
-let overlayTimerId    = null; // オーバーレイ自動クローズ
+let advanceLockRound = 0;     // 次ラウンド自動進行を同Rで1回に抑制
+let autoNextTimerId   = null; // 結果表示→次R のタイマ
+let overlayTimerId    = null; // オーバーレイ消去タイマ
 let resultOverlayEl   = null; // オーバーレイDOM
+let revealTickerId    = null; // 3秒カウントダウン描画用
 
 /* [07] 初期描画（盤面） */
 makeBoard();
@@ -215,7 +217,6 @@ if (btnClear) btnClear.onclick = () => {
 };
 
 if (btnPlay) btnPlay.onclick = () => { sfx.play(); submitCard(); };
-// btnNext は自動進行化により未使用
 
 /* [09] 対戦前の広告（ネイティブ時のみ 50%） */
 async function maybeAdThenStart(){
@@ -227,8 +228,8 @@ async function maybeAdThenStart(){
       await AdMob.initialize({ requestTrackingAuthorization: true });
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
       const adId = isIOS
-        ? "ca-app-pub-3940256099942544/6978759866"  // iOS Rewarded Interstitial (test)
-        : "ca-app-pub-3940256099942544/5354046379";  // Android Rewarded Interstitial (test)
+        ? "ca-app-pub-3940256099942544/6978759866"
+        : "ca-app-pub-3940256099942544/5354046379";
       await AdMob.prepareRewardedInterstitial({ adId });
       await AdMob.showRewardedInterstitial();
     } catch (e) {
@@ -250,6 +251,8 @@ async function createRoom(id, name){
     boardSize: BOARD_SIZE,
     roundStartMs: null,
     lastResult: null,
+    revealRound: null,       // ← 追加：両者提出後の演出用
+    revealUntilMs: null,     // ← 追加：演出終了時刻
     players: {
       p1: { id: myId, name, pos: 0, choice: null, hand: HAND_INIT, joinedAt: serverTimestamp() },
       p2: { id: null, name: null, pos: 0, choice: null, hand: HAND_INIT, joinedAt: null }
@@ -326,6 +329,8 @@ async function startGame(){
   updates[`rooms/${roomId}/round`] = 1;
   updates[`rooms/${roomId}/roundStartMs`] = Date.now();
   updates[`rooms/${roomId}/lastResult`] = null;
+  updates[`rooms/${roomId}/revealRound`] = null;
+  updates[`rooms/${roomId}/revealUntilMs`] = null;
   updates[`rooms/${roomId}/players/p1/pos`] = 0;
   updates[`rooms/${roomId}/players/p2/pos`] = 0;
   updates[`rooms/${roomId}/players/p1/choice`] = null;
@@ -369,6 +374,8 @@ async function leaveRoom(){
         updates[`rooms/${roomId}/round`]         = 0;
         updates[`rooms/${roomId}/roundStartMs`]  = null;
         updates[`rooms/${roomId}/lastResult`]    = null;
+        updates[`rooms/${roomId}/revealRound`]   = null;
+        updates[`rooms/${roomId}/revealUntilMs`] = null;
       }
       await update(ref(db), updates);
     }
@@ -381,8 +388,14 @@ async function leaveRoom(){
   }
 }
 
-/* [14] UIレンダリング（提出ロック・進行ガード・タイマー制御） */
+/* [14] UIレンダリング（提出ロック・演出・タイマー制御） */
 function renderGame(d){
+  // 新ラウンドに入ったらオーバーレイ閉じる
+  if (d.revealRound !== d.round && !(d.lastResult && d.lastResult._round === d.round)) {
+    hideResultOverlay();
+    stopRevealTicker();
+  }
+
   roundNo.textContent = d.round ?? 0;
   minRoundsEl.textContent = d.minRounds ?? MIN_ROUNDS;
 
@@ -422,14 +435,19 @@ function renderGame(d){
     const k = b.dataset.card;
     const left = me.hand[k]||0;
     const swapBlocked = (k==="SWAP" && diff>=8);
-    b.disabled = (left<=0) || iSubmitted || endedThisRound || swapBlocked;
-    b.classList.toggle("selected", selectedCard === k && !iSubmitted && !endedThisRound);
+    const disable = (left<=0) || iSubmitted || endedThisRound || swapBlocked || (d.revealRound===d.round); // ← 演出中も不可
+    b.disabled = disable;
+    b.classList.toggle("selected", selectedCard === k && !disable);
   });
-  if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8 || iSubmitted || endedThisRound;
-  if (btnPlay) btnPlay.disabled = !selectedCard || iSubmitted || endedThisRound;
+  if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8 || iSubmitted || endedThisRound || (d.revealRound===d.round);
+  if (btnPlay) btnPlay.disabled = !selectedCard || iSubmitted || endedThisRound || (d.revealRound===d.round);
 
   // ステータス
-  if (endedThisRound){
+  if (d.revealRound===d.round){
+    const remain = Math.max(0, Math.ceil((d.revealUntilMs - Date.now())/1000));
+    stateMsg.textContent = `判定まで… ${remain}s`;
+    showCountdownOverlay(remain); // 全端末でカウントダウン表示
+  } else if (endedThisRound){
     stateMsg.textContent = "結果を表示中… 次ラウンドに進みます";
   } else if (iSubmitted && !opSubmitted){
     stateMsg.textContent = "提出済み！相手の手を待っています…";
@@ -437,21 +455,24 @@ function renderGame(d){
     stateMsg.textContent = "10秒以内に出してね（出さないと負け）";
   }
 
-  // タイマー（ラウンドごとに再設定。結果が出たら止める）
+  // タイマー（演出中 or 結果後は止める）
   setupTimer(d.roundStartMs, d.round, me.choice, op.choice, d);
+
+  // もし演出が終わっていて、まだ結果が未適用なら（ホストのみ）→ 適用
+  maybeApplyAfterReveal(d);
 
   const lr = d.lastResult;
   resultText.textContent = lr ? prettyResult(lr) : "-";
 }
 
-/* [15] 10秒タイマー（毎R再起動、結果後停止） */
+/* [15] 10秒タイマー（毎R再起動、結果/演出中は停止） */
 function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
   if (localTimer) clearInterval(localTimer);
   lastBeepSec = null;
 
   const ended = !!(roomData?.lastResult && roomData.lastResult._round === roomData.round);
-  if (ended){ timerEl.textContent = "OK"; return; }
-  if (myChoice && opChoice){ timerEl.textContent = "OK"; return; } // 両者提出済み
+  const revealing = (roomData?.revealRound === roomData?.round);
+  if (ended || revealing || (myChoice && opChoice)){ timerEl.textContent = "OK"; return; }
 
   const deadline = (roundStartMs || Date.now()) + TURN_TIME;
 
@@ -479,16 +500,14 @@ function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
 /* [16] カード選択＆ヒント */
 function pickCard(code){
   if (roundLocked) return; // 既にこのラウンドは提出済み
-  cardBtns.forEach(b => b.classList.remove("selected"));
   const btn = document.querySelector(`.cardBtn[data-card="${code}"]`);
   if (btn?.disabled) return;
 
   selectedCard = code;
-  btn?.classList.add("selected");
+  cardBtns.forEach(b => b.classList.toggle("selected", b===btn));
   if (btnPlay) btnPlay.disabled = false;
   stateMsg.textContent = displayHint(code);
 }
-
 function displayHint(code){
   switch(code){
     case "G": return "グーで勝つと+3マス";
@@ -535,42 +554,41 @@ async function submitCard(){
   cardBtns.forEach(b => { b.classList.remove("selected"); b.disabled = true; });
   if (btnPlay) btnPlay.disabled = true;
 
-  await settleIfReady(); // 両者出揃っていれば即判定
+  // ここでは即判定せず、両者出揃いを待つ
+  await tryStartRevealIfBothReady();
 }
 
-/* [18] タイムアウト決着 */
-async function settleIfReady(){
+async function tryStartRevealIfBothReady(){
   const snap = await get(child(ref(db), `rooms/${roomId}`));
   if (!snap.exists()) return;
   const d = snap.val();
   const p1 = d.players.p1, p2 = d.players.p2;
-  if (!p1.choice || !p2.choice) return;
+  const both = !!p1.choice && !!p2.choice;
 
-  const result = judgeRound(p1, p2);
-  await applyResult(d, result);
-  playResultSfx(result);
-
-  if (localTimer) clearInterval(localTimer);
-  timerEl.textContent = "OK";
-
-  showResultOverlay(makeRoundSummary(result), 3000);
-  scheduleAutoNext(d);
+  // ホストのみ、演出が未セットならセット
+  if (both && seat === "p1" && d.revealRound !== d.round){
+    await update(ref(db), {
+      [`rooms/${roomId}/revealRound`]: d.round,
+      [`rooms/${roomId}/revealUntilMs`]: Date.now() + REVEAL_MS
+    });
+  }
 }
 
+/* [18] タイムアウト決着 */
 async function settleTimeout(roomData){
   const d = roomData ?? (await get(child(ref(db), `rooms/${roomId}`))).val();
   const p1 = d.players.p1, p2 = d.players.p2;
   const a = p1.choice, b = p2.choice;
-  if (a && b) return;
+  if (a && b) return; // すでに両者提出済みの場合は演出ルートへ
 
   let result;
   if (!a && b){ result = winByDefault("p2", b, d); }
   else if (a && !b){ result = winByDefault("p1", a, d); }
   else { result = { type:"timeout-tie", winner:null, delta:{p1:0,p2:0}, note:"両者未提出" }; }
+
   await applyResult(d, result);
   playResultSfx(result);
-
-  showResultOverlay(makeRoundSummary(result), 3000);
+  showResultOverlay(makeRoundSummary(result), REVEAL_MS);
   scheduleAutoNext(d);
 }
 
@@ -643,7 +661,7 @@ function playResultSfx(r){
   }
 }
 
-/* [20] 結果適用＆ラウンド遷移（オート進行） */
+/* [20] 結果適用→自動で次ラウンド（ホストのみ） */
 async function applyResult(d, r){
   if (d.lastResult && d.lastResult._round === d.round) return;
 
@@ -664,6 +682,8 @@ async function applyResult(d, r){
     [`rooms/${roomId}/players/p1/pos`]: p1pos,
     [`rooms/${roomId}/players/p2/pos`]: p2pos,
     [`rooms/${roomId}/lastResult`]: { ...r, _round: d.round },
+    [`rooms/${roomId}/revealRound`]: null,      // ← 演出フラグをクリア
+    [`rooms/${roomId}/revealUntilMs`]: null     // ← 演出時刻クリア
   });
 }
 
@@ -695,7 +715,7 @@ function scheduleAutoNext(d){
       });
 
       const meWin = winner ? (winner === (seat==="p1"?"p1":"p2")) : null;
-      showResultOverlay(meWin===null ? "🤝 引き分け！" : (meWin ? "🏆 勝利！" : "😢 敗北…"), 3000);
+      showResultOverlay(meWin===null ? "🤝 引き分け！" : (meWin ? "🏆 勝利！" : "😢 敗北…"), REVEAL_MS);
       return;
     }
 
@@ -710,7 +730,30 @@ function scheduleAutoNext(d){
     // 次ラウンドのためにローカルロック解除
     roundLocked = false;
     selectedCard = null;
-  }, 3000);
+    hideResultOverlay();
+  }, REVEAL_MS);
+}
+
+/* ホストだけが演出終了時に結果を適用 */
+async function maybeApplyAfterReveal(d){
+  const revealing = (d.revealRound === d.round) && typeof d.revealUntilMs === "number";
+  const both = !!d.players.p1.choice && !!d.players.p2.choice;
+  const alreadyApplied = !!(d.lastResult && d.lastResult._round === d.round);
+
+  if (seat !== "p1") return;
+  if (!revealing || !both || alreadyApplied) return;
+
+  if (Date.now() >= d.revealUntilMs){
+    const result = judgeRound(d.players.p1, d.players.p2);
+    await applyResult(d, result);
+    playResultSfx(result);
+    showResultOverlay(makeRoundSummary(result), REVEAL_MS);
+    scheduleAutoNext(d);
+  } else {
+    // まだ演出中：表示だけ更新
+    const remain = Math.max(0, Math.ceil((d.revealUntilMs - Date.now())/1000));
+    showCountdownOverlay(remain);
+  }
 }
 
 /* [21] 盤面ヘルパ */
@@ -733,7 +776,7 @@ function placeTokens(p1, p2, size){
   if (idx2>=0){ const t = document.createElement("div"); t.className = "token op"; cells[idx2]?.appendChild(t); }
 }
 
-/* [22] ユーティリティ */
+/* [22] ユーティリティ（オーバーレイ/カウントダウン等） */
 function updateCounts(h){
   cntG.textContent = `×${h.G||0}`;
   cntC.textContent = `×${h.C||0}`;
@@ -762,38 +805,39 @@ function prettyResult(r){
 function clamp25(x){ return Math.max(0, Math.min(25, x)); }
 function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
 
-// ==== 結果オーバーレイ（3秒で自動消滅） ====
-function showResultOverlay(text, ms=3000){
-  if (!resultOverlayEl){
-    resultOverlayEl = document.createElement("div");
-    resultOverlayEl.style.position = "fixed";
-    resultOverlayEl.style.top = "0";
-    resultOverlayEl.style.left = "0";
-    resultOverlayEl.style.right = "0";
-    resultOverlayEl.style.bottom = "0";
-    resultOverlayEl.style.background = "rgba(0,0,0,0.5)";
-    resultOverlayEl.style.display = "flex";
-    resultOverlayEl.style.alignItems = "center";
-    resultOverlayEl.style.justifyContent = "center";
-    resultOverlayEl.style.zIndex = "9999";
-    resultOverlayEl.style.backdropFilter = "blur(2px)";
-    const inner = document.createElement("div");
-    inner.id = "overlayInner";
-    inner.style.background = "white";
-    inner.style.borderRadius = "16px";
-    inner.style.padding = "20px 24px";
-    inner.style.fontSize = "18px";
-    inner.style.textAlign = "center";
-    inner.style.minWidth = "240px";
-    inner.style.boxShadow = "0 8px 24px rgba(0,0,0,.25)";
-    resultOverlayEl.appendChild(inner);
-    document.body.appendChild(resultOverlayEl);
-  }
-  const inner = resultOverlayEl.querySelector("#overlayInner");
+// ==== 結果オーバーレイ ====
+function ensureOverlay(){
+  if (resultOverlayEl) return resultOverlayEl;
+  resultOverlayEl = document.createElement("div");
+  resultOverlayEl.style.position = "fixed";
+  resultOverlayEl.style.top = "0";
+  resultOverlayEl.style.left = "0";
+  resultOverlayEl.style.right = "0";
+  resultOverlayEl.style.bottom = "0";
+  resultOverlayEl.style.background = "rgba(0,0,0,0.5)";
+  resultOverlayEl.style.display = "none";
+  resultOverlayEl.style.alignItems = "center";
+  resultOverlayEl.style.justifyContent = "center";
+  resultOverlayEl.style.zIndex = "9999";
+  resultOverlayEl.style.backdropFilter = "blur(2px)";
+  const inner = document.createElement("div");
+  inner.id = "overlayInner";
+  inner.style.background = "white";
+  inner.style.borderRadius = "16px";
+  inner.style.padding = "20px 24px";
+  inner.style.fontSize = "18px";
+  inner.style.textAlign = "center";
+  inner.style.minWidth = "240px";
+  inner.style.boxShadow = "0 8px 24px rgba(0,0,0,.25)";
+  resultOverlayEl.appendChild(inner);
+  document.body.appendChild(resultOverlayEl);
+  return resultOverlayEl;
+}
+function showResultOverlay(text, ms=REVEAL_MS){
+  const el = ensureOverlay();
+  const inner = el.querySelector("#overlayInner");
   inner.textContent = text;
-  resultOverlayEl.style.opacity = "1";
-  resultOverlayEl.style.pointerEvents = "auto";
-  resultOverlayEl.style.display = "flex";
+  el.style.display = "flex";
 
   if (overlayTimerId) clearTimeout(overlayTimerId);
   overlayTimerId = setTimeout(hideResultOverlay, ms);
@@ -801,7 +845,25 @@ function showResultOverlay(text, ms=3000){
 function hideResultOverlay(){
   if (!resultOverlayEl) return;
   resultOverlayEl.style.display = "none";
+  if (overlayTimerId) { clearTimeout(overlayTimerId); overlayTimerId = null; }
 }
+function showCountdownOverlay(sec){
+  const el = ensureOverlay();
+  el.style.display = "flex";
+  const inner = el.querySelector("#overlayInner");
+  inner.textContent = `判定まで… ${sec}s`;
+
+  stopRevealTicker();
+  revealTickerId = setInterval(()=>{
+    const s = Math.max(0, sec - Math.floor((Date.now()%1000)/1000)); // ざっくり描画
+    inner.textContent = `判定まで… ${sec}s`;
+  }, 300);
+}
+function stopRevealTicker(){
+  if (revealTickerId){ clearInterval(revealTickerId); revealTickerId = null; }
+}
+
+// ラウンド結果の要約文
 function makeRoundSummary(r){
   if (r.swap) return "🔁 位置を交換！";
   if (r.type === "barrier") return "🛡️ バリア発動：相手の必勝/位置交換を防ぎました";
