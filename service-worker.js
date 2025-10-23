@@ -1,5 +1,5 @@
 // service-worker.js
-const CACHE_NAME = 'rps-cards-v8.1'; // デプロイのたびに番号を上げると反映が早い
+const CACHE_NAME = 'rps-cards-v8.2'; // デプロイのたびに番号を上げると反映が早い
 const APP_SHELL = [
   './',
   './index.html',
