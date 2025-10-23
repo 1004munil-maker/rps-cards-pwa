@@ -72,13 +72,14 @@ const { initializeApp, getDatabase, ref, onValue, set, update, get, child, serve
 
 // ★ あなたの firebaseConfig を貼り付けてね（databaseURL を忘れずに）
 const firebaseConfig = {
-  apiKey: "…",
-  authDomain: "…",
-  databaseURL: "https://rps-cards-pwa-default-rtdb.firebaseio.com/",
+  apiKey: "AIzaSyBfrZSzcdCazQii03POnM--fRRMOa5LEs0",
+  authDomain: "rps-cards-pwa.firebaseapp.com",
+  databaseURL: "https://rps-cards-pwa-default-rtdb.firebaseio.com", // ← コンソール表示に合わせる
   projectId: "rps-cards-pwa",
-  storageBucket: "…",
-  messagingSenderId: "…",
-  appId: "…"
+  storageBucket: "rps-cards-pwa.appspot.com", // ← ★ここを appspot.com に修正
+  messagingSenderId: "1080977402813",
+  appId: "1:1080977402813:web:2a82ba4946c6e9717e40d4",
+  measurementId: "G-BZM8R02K18" // 入っていてもOK（未使用ならそのままで大丈夫）
 };
 
 const app = initializeApp(firebaseConfig);
