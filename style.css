@@ -1,3 +1,12 @@
+/* =========================================================
+   RPS Cards — style.css（PWA最適化・10×2盤・Android右切れ修正）
+   - 端末幅にフィット（9:16固定はやめる）
+   - 盤面は常に 10×2（20マス）
+   - スクロール抑制／はみ出し根絶
+   - 同マス重なり時のはみ出し防止
+   - おしゃれ系UI（やさしいグラデ＆影）
+   ========================================================= */
+
 /* ============ 基本 ============ */
 :root{
   --bg: #fff5fa;
@@ -17,23 +26,31 @@ html,body{
   background: radial-gradient(160% 140% at 100% 0%, #fff 0%, #fff6fb 50%, #ffeaf5 100%);
   color: var(--ink);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+  overscroll-behavior: none;     /* iOS/Androidでの引っ張り無効 */
+  overflow-x: hidden;            /* 横はみ出し根絶（Android右切れ対策） */
 }
+img, video{ max-width:100%; height:auto; display:block; }
 
-/* PWA風：スクロール抑制＆はみ出し対策 */
-body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; -webkit-user-select:none; user-select:none; }
+body{ overflow: hidden; touch-action: manipulation; } /* PWA風：ページスクロール抑制 */
 
 .hidden{ display:none !important; }
 
+/* ============ ルート枠（幅可変・高さは安全ビューポート） ============ */
 .root9x16{
   position: relative;
-  max-width: 520px;
   width: 100%;
-  height: 100dvh; /* iOSでも安定する最新単位 */
-  min-height: 100svh;
-  margin: 0 auto;
+  max-width: 520px;
+  height: 100svh;              /* アドレスバー揺れに強い */
+  min-height: 100dvh;          /* 互換フォールバック */
+  margin-inline: auto;
   display: flex; align-items: stretch; justify-content: center;
-  padding: calc(env(safe-area-inset-top) + 8px) 10px calc(env(safe-area-inset-bottom) + 8px);
-  overflow: hidden; /* 上下バウンス抑止 */
+
+  /* Androidで右が切れるのを防ぎつつ安全域も確保 */
+  padding-left:  calc(max(env(safe-area-inset-left, 0px), 10px));
+  padding-right: calc(max(env(safe-area-inset-right, 0px), 10px));
+  padding-top:    calc(env(safe-area-inset-top, 0px) + 8px);
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+  box-sizing: border-box;
 }
 
 .wrap{
@@ -41,6 +58,7 @@ body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; -
   display: grid;
   grid-template-rows: auto 1fr auto;
   gap: 10px;
+  min-height: 0;               /* 子グリッド溢れ防止 */
   padding-bottom: env(safe-area-inset-bottom);
 }
 
@@ -53,7 +71,7 @@ body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; -
 .brand__text h1{ font-size: 18px; margin: 0 0 2px; }
 .brand__text .brand__sub{ font-size: 12px; margin: 0; color: var(--muted); }
 
-/* ヘルプFAB */
+/* ヘルプFAB（？ボタン） */
 .help-fab{
   width: 36px; height: 36px; border-radius: 999px; border: none;
   background: linear-gradient(180deg, #fff, #fff7fb);
@@ -111,26 +129,27 @@ button:disabled{ opacity: .55; cursor: not-allowed; }
 }
 .timer b{ font-variant-numeric: tabular-nums; }
 
-/* ============ 盤面（常に10×2） ============ */
+/* ============ 盤面 10×2 ============ */
 .board{
   width: 100%;
   margin: 8px 0;
-  display: grid;
-  grid-template-columns: repeat(10, minmax(0,1fr)); /* ★10列固定 */
-  grid-auto-flow: row;
-  gap: 6px;
-  contain: layout paint; /* 右端切れ/再レイアウトの安定化（Android対策） */
+  user-select: none;
 }
-/* 互換：.board--10x2 を付けててもOK（同じ指定に合流） */
-.board--10x2{ grid-template-columns: repeat(10, minmax(0,1fr)); }
+.board--10x2{
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr)); /* 10列 × 2行 */
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 6px;
+}
 
+/* セル（横長めで上方向に圧縮、同マス時も飛び出さない） */
 .cell{
   position: relative;
   background: radial-gradient(120% 100% at 100% 0%, #ffffff 0%, #fff5fb 60%, #ffe6f4 100%);
   border-radius: 12px;
   aspect-ratio: 1 / 0.6;   /* 高さをさらに圧縮して全体を上に */
   box-shadow: inset 0 0 0 2px #ffe0ef;
-  overflow: hidden;        /* ★はみ出しを防ぐ（同マス時の飛び出し対策） */
+  overflow: hidden;        /* ★同マス時のトークン飛び出し防止 */
 }
 .cell.goal{
   box-shadow: inset 0 0 0 3px var(--pink), 0 0 0 2px rgba(255, 153, 200, .15);
@@ -139,13 +158,11 @@ button:disabled{ opacity: .55; cursor: not-allowed; }
 /* コマ（少し小さめ＆縁取りで視認性UP） */
 .token{
   position: absolute;
-  width: 48%; height: 48%;          /* 以前より小さめ */
+  width: 48%; height: 48%;  /* 以前より小さめ */
   top: 26%; left: 26%;
   border-radius: 999px;
   outline: 2px solid #fff;
   box-shadow: 0 6px 16px rgba(0,0,0,.18);
-  pointer-events:none;              /* タップ拾わない */
-  will-change: transform;           /* オフセット時のチラつき抑制 */
 }
 .token.me{ background: #ff99c8d0; }
 .token.op{ background: #8ecae6d0; }
@@ -183,6 +200,9 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
 .footer{ text-align:center; color:#999; font-size:12px; }
 .ad-card{ padding:6px 8px; margin-top: 10px; }
 
+/* Google AdSense はみ出し保険（Androidで起きがち） */
+.adsbygoogle { max-width: 100% !important; display:block !important; }
+
 /* ============ 向き警告 ============ */
 .orientation-guard{
   position:fixed; inset:0; display:none;
@@ -198,7 +218,7 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
   .orientation-guard{ display:flex; }
 }
 
-/* ============ ヘルプモーダル ============ */
+/* ============ ヘルプモーダル（？ボタン） ============ */
 .help-modal{
   position: fixed; inset: 0; z-index: 9998;
   display: grid; place-items: center;
@@ -230,13 +250,7 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
 .help-modal__foot{ display:flex; justify-content:flex-end; gap:8px; margin-top: 10px; }
 
 /* ============ 細かい調整 ============ */
-/* 低背端末や横幅狭い端末で、盤面をさらに圧縮して“上切れ”を防ぐ */
-@media (max-height: 740px){
-  .cell{ aspect-ratio: 1 / 0.55; }
-}
-@media (max-height: 680px){
-  .cell{ aspect-ratio: 1 / 0.50; }
-}
+.wrap{ padding-bottom: env(safe-area-inset-bottom); }
 
 /* さらに小さい端末で詰める */
 @media (max-width: 360px){
@@ -248,9 +262,3 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
 
 /* スクロールバー非表示（念のため） */
 ::-webkit-scrollbar{ display:none; }
-
-/* アニメ少なめ指定の端末で影・拡大を弱める */
-@media (prefers-reduced-motion: reduce){
-  *{ transition:none!important; animation:none!important }
-  .card, .infoBar{ box-shadow: 0 6px 18px rgba(0,0,0,.12); }
-}
