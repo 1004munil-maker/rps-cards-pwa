@@ -1,7 +1,6 @@
 <!doctype html>
 <html lang="ja">
 <head>
-  <!-- [H01] 基本メタ & PWA -->
   <meta charset="utf-8" />
   <meta name="viewport"
         content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -10,54 +9,51 @@
   <meta name="theme-color" content="#ff99c8">
   <title>じゃんけんカード・レース</title>
 
-  <!-- [H02] PWAマニフェスト & アイコン -->
+  <!-- ▼ PWA -->
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
 
-  <!-- [H03] AdSense 自動広告（Auto ads）: Publisher ID を設定済み -->
+  <!-- AdSense Auto ads (あなたのクライアントIDでOK) -->
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3891016340964160"
           crossorigin="anonymous"></script>
 
-  <!-- [H04] スタイル -->
   <link rel="stylesheet" href="style.css" />
 
-  <!-- [H05] Firebase CDN（Modular v11） -->
+  <!-- Firebase CDN (Modular v11) -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
     import { getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js";
-    // 必要に応じて Auth を追加する場合はこちら：
-    // import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-auth.js";
-    window.FirebaseAPI = { initializeApp, getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove };
+    import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-auth.js";
+    window.FirebaseAPI = { initializeApp, getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove, getAuth, signInAnonymously };
   </script>
 </head>
 <body>
-  <!-- [B01] 縦固定(9:16)の表示枠 -->
+  <!-- 縦固定(9:16)の表示枠 -->
   <div id="root9x16" class="root9x16">
     <main class="wrap">
-      <!-- [B02] ブランドヘッダ -->
       <header class="brand">
         <div class="brand__icon">🧸</div>
         <h1>じゃんけんカード・レース</h1>
         <p class="brand__sub">25マスでゴールを目指すよ（最低8ラウンド）</p>
       </header>
 
-      <!-- [B03] 参加フォーム（名前は app.js 側で必須チェック） -->
+      <!-- 参加 -->
       <section id="auth" class="card">
         <div class="row">
           <input id="playerName" placeholder="名前（例：CHOI）" maxlength="12" />
         </div>
         <div class="row">
-          <button id="btnCreate" class="primary">🎉 部屋を作る</button>
+          <button id="btnCreate" class="primary" disabled>🎉 部屋を作る</button>
         </div>
         <div class="row">
           <input id="joinId" placeholder="部屋ID（6文字）" maxlength="6" />
-          <button id="btnJoin">入室</button>
+          <button id="btnJoin" disabled>入室</button>
         </div>
         <p class="help">友だちに部屋IDを共有してね。GitHub Pages でOK！</p>
       </section>
 
-      <!-- [B04] ロビー（p2が来るまで開始ボタンは無効） -->
+      <!-- ロビー -->
       <section id="lobby" class="card hidden">
         <p>部屋ID: <b id="roomIdLabel"></b> <button id="btnCopy" class="ghost">コピー</button></p>
         <p>プレイヤー: <span id="p1Label">-</span> vs <span id="p2Label">-</span></p>
@@ -67,7 +63,7 @@
         </div>
       </section>
 
-      <!-- [B05] ゲーム画面 -->
+      <!-- ゲーム -->
       <section id="game" class="hidden">
         <div class="infoBar">
           <div>ラウンド <b id="roundNo">-</b> / <span id="minRounds">8</span>+</div>
@@ -139,40 +135,35 @@
         </div>
       </section>
 
-      <!-- [B06] 手動の広告ユニット（任意・安全配置：フッター直前） 
-           - data-ad-client はあなたの Publisher ID 済み
-           - data-ad-slot を AdSense の「広告ユニットごと」で発行した番号に置き換え -->
-      <section class="card" id="ad-slot-footer" style="padding:4px 8px; margin-top:12px;">
-        <ins class="adsbygoogle"
-             style="display:block"
-             data-ad-client="ca-pub-3891016340964160"
-             data-ad-slot="5935056834"  <!-- ★ここをあなたのスロット番号に -->
-             data-ad-format="auto"
-             data-full-width-responsive="true"></ins>
-        <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
-      </section>
-
-      <!-- [B07] フッター（任意で privacy.html へリンク可） -->
-      <footer>
-        <small>© 2025 RPS Cards — pastel & comfy 💗
-          <!-- <a href="./privacy.html">プライバシーポリシー</a> -->
-        </small>
-      </footer>
+      <footer><small>© 2025 RPS Cards — pastel & comfy 💗</small></footer>
     </main>
   </div>
 
-  <!-- [B08] 横向き時のガード（縦に戻してね） -->
+  <!-- 結果／ゲーム終了 オーバーレイ -->
+  <div class="overlay hidden" id="overlay">
+    <div class="overlay-card">
+      <div class="overlay-title" id="overlayTitle">結果</div>
+      <div class="overlay-body">
+        <div id="overlayMsg">…</div>
+        <div class="overlay-count" id="overlayCount">3</div>
+      </div>
+      <div class="overlay-actions hidden" id="overlayActions">
+        <button id="btnReplay" class="primary">もう一回！</button>
+        <button id="btnExit2" class="warn">退室</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 横向き時のガード（縦に戻してね） -->
   <div class="orientation-guard" id="orientationGuard">
     <div class="og-card">
       📱 画面を縦向きにしてください
     </div>
   </div>
 
-  <!-- [S01] アプリ本体スクリプト -->
   <script type="module" src="app.js"></script>
-
-  <!-- [S02] Service Worker 登録（PWA） -->
   <script>
+    // Register service worker
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('./service-worker.js');
