@@ -1,10 +1,11 @@
 /* =========================================================
-   RPS Cards — app.js（番号付き）
+   RPS Cards — app.js（番号付き・フル）
    ---------------------------------------------------------
    [01] モバイル対策（コピー/ズーム禁止・縦固定）
    [02] 効果音（SFX）
    [03] Firebase 初期化
    [04] DOM取得
+   [04.5] 名前必須ガード（入力が1文字未満なら作成/参加ボタン無効）
    [05] 定数
    [06] 状態
    [07] 初期描画（盤面）
@@ -14,13 +15,13 @@
    [11] ロビー購読（開始ボタンのガード付き）
    [12] ゲーム開始（サーバー側ガード）
    [13] 退出処理（ホストは部屋削除 / ゲストはp2クリア）
-   [14] UIレンダリング
-   [15] 10秒タイマー
-   [16] カード選択＆ヒント
-   [17] 提出と即時判定トリガ
-   [18] タイムアウト決着
+   [14] UIレンダリング（提出ロック・進行ガード・タイマー制御）
+   [15] 10秒タイマー（毎R再起動、結果後停止）
+   [16] カード選択＆ヒント（提出後は選べない）
+   [17] 提出（多重提出防止・UIロック）
+   [18] タイムアウト決着（結果後はタイマー停止）
    [19] ルール判定＆効果音
-   [20] 結果適用＆ラウンド遷移（8R以降の勝敗）
+   [20] 結果適用＆ラウンド遷移（ホストのみ進行）
    [21] 盤面ヘルパ
    [22] ユーティリティ
    ========================================================= */
@@ -37,9 +38,7 @@ document.addEventListener('touchend', e => {
   lastTouchEnd = now;
 }, { passive: false, capture: true });
 document.addEventListener('wheel', e => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
-(async () => {
-  try { if (screen.orientation?.lock) await screen.orientation.lock('portrait'); } catch(_) {}
-})();
+(async () => { try { if (screen.orientation?.lock) await screen.orientation.lock('portrait'); } catch(_) {} })();
 
 /* [02] 効果音（SFX） */
 class SFX {
@@ -74,18 +73,15 @@ const { initializeApp, getDatabase, ref, onValue, set, update, get, child, serve
 const firebaseConfig = {
   apiKey: "AIzaSyBfrZSzcdCazQii03POnM--fRRMOa5LEs0",
   authDomain: "rps-cards-pwa.firebaseapp.com",
-  databaseURL: "https://rps-cards-pwa-default-rtdb.firebaseio.com", // ← コンソール表示に合わせる
+  databaseURL: "https://rps-cards-pwa-default-rtdb.firebaseio.com",
   projectId: "rps-cards-pwa",
-  storageBucket: "rps-cards-pwa.appspot.com", // ← ★ここを appspot.com に修正
+  storageBucket: "rps-cards-pwa.appspot.com",
   messagingSenderId: "1080977402813",
   appId: "1:1080977402813:web:2a82ba4946c6e9717e40d4",
-  measurementId: "G-BZM8R02K18" // 入っていてもOK（未使用ならそのままで大丈夫）
+  measurementId: "G-BZM8R02K18"
 };
-
 const app = initializeApp(firebaseConfig);
 const db  = getDatabase(app);
-
-
 
 /* [04] DOM取得 */
 const $ = s => document.querySelector(s);
@@ -123,7 +119,7 @@ const btnExit    = $("#btnExit");
 const cardBtns   = [...document.querySelectorAll(".cardBtn")];
 const cntG       = $("#cntG"), cntC=$("#cntC"), cntP=$("#cntP"), cntWIN=$("#cntWIN"), cntSWAP=$("#cntSWAP"), cntBARRIER=$("#cntBARRIER");
 
-// --- 名前未入力はボタン無効化（1文字以上で有効） ---
+/* [04.5] 名前必須ガード（入力が1文字未満なら作成/参加ボタン無効） */
 btnCreate.disabled = true;
 btnJoin.disabled   = true;
 playerName.addEventListener('input', () => {
@@ -147,6 +143,7 @@ let unsubRoom = null;
 let selectedCard = null;
 let localTimer = null;
 let lastBeepSec = null;
+let roundLocked = false; // ★ このラウンドで自分は提出済みかどうか
 
 /* [07] 初期描画（盤面） */
 makeBoard();
@@ -155,51 +152,36 @@ makeBoard();
 btnCreate.onclick = async () => {
   sfx.click();
   const name = (playerName.value || "").trim();
-  if (name.length < 1) {
-    alert("名前を1文字以上入力してね");
-    playerName.focus();
-    return;
-  }
+  if (name.length < 1) { alert("名前を1文字以上入力してね"); playerName.focus(); return; }
   myName = name;
   roomId = rid(6);
   seat = "p1";
-  await createRoom(roomId, myName);
-  enterLobby();
+  try {
+    await createRoom(roomId, myName);
+    enterLobby();
+  } catch (e) {
+    console.error("createRoom failed:", e);
+    alert("部屋作成に失敗しました：" + (e?.message || e));
+  }
 };
 
-// 置き換え：参加ボタン
 btnJoin.onclick = async () => {
   sfx.click();
   const name = (playerName.value || "").trim();
-  if (name.length < 1) {
-    alert("名前を1文字以上入力してね");
-    playerName.focus();
-    return;
-  }
+  if (name.length < 1) { alert("名前を1文字以上入力してね"); playerName.focus(); return; }
   myName = name;
 
   roomId = (joinId.value || "").trim().toUpperCase();
-  if (!roomId) {
-    alert("部屋IDを入力してね");
-    joinId.focus();
-    return;
-  }
+  if (!roomId) { alert("部屋IDを入力してね"); joinId.focus(); return; }
 
-  // ここが変更点：理由別にメッセージを出し分け
   const res = await joinRoom(roomId, myName);
   if (!res.ok) {
-    if (res.reason === "NO_ROOM") {
-      alert("部屋番号が存在しません");
-    } else if (res.reason === "FULL") {
-      alert("その部屋は満席です");
-    } else if (res.reason === "NO_NAME") {
-      alert("名前を1文字以上入力してね");
-    } else {
-      alert("参加に失敗しました。時間をおいて再度お試しください。");
-    }
+    if (res.reason === "NO_ROOM") alert("部屋番号が存在しません");
+    else if (res.reason === "FULL") alert("その部屋は満席です");
+    else if (res.reason === "NO_NAME") alert("名前を1文字以上入力してね");
+    else alert("参加に失敗しました。時間をおいて再度お試しください。");
     return;
   }
-
   seat = "p2";
   enterLobby();
 };
@@ -215,11 +197,10 @@ btnStart.onclick = async () => { await maybeAdThenStart(); };
 btnLeave.onclick = () => { sfx.click(); leaveRoom(); };
 btnExit.onclick  = () => { sfx.click(); leaveRoom(); };
 
-cardBtns.forEach(b => {
-  b.onclick = () => { sfx.click(); pickCard(b.dataset.card); };
-});
+cardBtns.forEach(b => { b.onclick = () => { sfx.click(); pickCard(b.dataset.card); }; });
 
 btnClear.onclick = () => {
+  if (roundLocked) return; // 提出後は解除不可
   selectedCard = null;
   cardBtns.forEach(b => b.classList.remove("selected"));
   btnPlay.disabled = true;
@@ -234,7 +215,6 @@ async function maybeAdThenStart(){
   const showAd = Math.random() < 0.5;
   const isNative = !!window.Capacitor?.isNativePlatform;
   const AdMob = window.Capacitor?.Plugins?.AdMob;
-
   if (isNative && showAd && AdMob){
     try {
       await AdMob.initialize({ requestTrackingAuthorization: true });
@@ -250,7 +230,6 @@ async function maybeAdThenStart(){
     await startGame();
     return;
   }
-  // Web(PWA)や広告非表示時はそのまま開始
   await startGame();
 }
 
@@ -271,7 +250,6 @@ async function createRoom(id, name){
   });
 }
 
-// 置き換え：部屋参加（理由つきで返す）
 async function joinRoom(id, name){
   name = (name || "").trim();
   if (!name) return { ok:false, reason:"NO_NAME" };
@@ -311,12 +289,8 @@ function enterLobby(){
     const inGame = (d.state === "playing" || d.state === "ended");
 
     btnStart.disabled = !(isHost && twoJoined) || inGame;
-    btnStart.textContent = isHost
-      ? (twoJoined ? "▶ 対戦開始" : "相手待ち…")
-      : "ホストが開始します";
-    btnStart.title = isHost
-      ? (twoJoined ? "開始できます" : "もう一人が入室するまで待ってね")
-      : "開始はホストが行います";
+    btnStart.textContent = isHost ? (twoJoined ? "▶ 対戦開始" : "相手待ち…") : "ホストが開始します";
+    btnStart.title = isHost ? (twoJoined ? "開始できます" : "もう一人が入室するまで待ってね") : "開始はホストが行います";
 
     if (inGame){
       lobby.classList.add("hidden");
@@ -372,10 +346,8 @@ async function leaveRoom(){
     const d = snap.val();
 
     if (seat === "p1") {
-      // ホスト退出 → 部屋ごと削除
       await remove(ref(db, `rooms/${roomId}`));
     } else {
-      // ゲスト退出 → p2スロット初期化（対戦中ならロビーに戻す）
       const base = `rooms/${roomId}/players/p2`;
       const updates = {};
       updates[`${base}/id`]       = null;
@@ -390,8 +362,6 @@ async function leaveRoom(){
         updates[`rooms/${roomId}/round`]         = 0;
         updates[`rooms/${roomId}/roundStartMs`]  = null;
         updates[`rooms/${roomId}/lastResult`]    = null;
-        // 必要なら p1 の pos もリセット：
-        // updates[`rooms/${roomId}/players/p1/pos`] = 0;
       }
       await update(ref(db), updates);
     }
@@ -404,7 +374,7 @@ async function leaveRoom(){
   }
 }
 
-/* [14] UIレンダリング */
+/* [14] UIレンダリング（提出ロック・進行ガード・タイマー制御） */
 function renderGame(d){
   roundNo.textContent = d.round ?? 0;
   minRoundsEl.textContent = d.minRounds ?? MIN_ROUNDS;
@@ -413,33 +383,72 @@ function renderGame(d){
   const opSeat = seat==="p1" ? "p2" : "p1";
   const op = d.players[opSeat];
 
+  const iSubmitted      = !!me.choice;
+  const opSubmitted     = !!op.choice;
+  const bothSubmitted   = iSubmitted && opSubmitted;
+  const endedThisRound  = !!(d.lastResult && d.lastResult._round === d.round);
+  const isHost          = (seat === "p1");
+
+  // 手札・ボード
   updateCounts(me.hand);
   placeTokens(d.players.p1.pos, d.players.p2.pos, d.boardSize);
   mePosEl.textContent = seat==="p1" ? d.players.p1.pos : d.players.p2.pos;
   opPosEl.textContent = seat==="p1" ? d.players.p2.pos : d.players.p1.pos;
 
-  diffEl.textContent = Math.abs((seat==="p1"?d.players.p1.pos:d.players.p2.pos) - (seat==="p1"?d.players.p2.pos:d.players.p1.pos));
+  diffEl.textContent = Math.abs(
+    (seat==="p1"?d.players.p1.pos:d.players.p2.pos) -
+    (seat==="p1"?d.players.p2.pos:d.players.p1.pos)
+  );
 
   meChoiceEl.textContent = toFace(me.choice) || "？";
   opChoiceEl.textContent = toFace(op.choice) || "？";
 
+  // SWAP使用可否（差が8以上は不可）
   const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
   const swapBtn = document.querySelector('.cardBtn[data-card="SWAP"]');
-  if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8;
 
+  // ラウンド提出ロック
+  roundLocked = iSubmitted;
+
+  // 手札ボタン・出すボタンの有効/無効
+  cardBtns.forEach(b=>{
+    const k = b.dataset.card;
+    const left = me.hand[k]||0;
+    const swapBlocked = (k==="SWAP" && diff>=8);
+    b.disabled = (left<=0) || iSubmitted || swapBlocked;
+    b.classList.toggle("selected", selectedCard === k && !iSubmitted);
+  });
+  if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8 || iSubmitted;
+  btnPlay.disabled = !selectedCard || iSubmitted;
+
+  // ステータス
+  if (endedThisRound){
+    stateMsg.textContent = "結果を確認して『次のラウンド』を押してね（ホストのみ）";
+  } else if (iSubmitted && !opSubmitted){
+    stateMsg.textContent = "提出済み！相手の手を待っています…";
+  } else {
+    stateMsg.textContent = "10秒以内に出してね（出さないと負け）";
+  }
+
+  // タイマー：毎R再設定。結果が出たら止める。
   setupTimer(d.roundStartMs, d.round, me.choice, op.choice, d);
 
+  // 結果表示
   const lr = d.lastResult;
   resultText.textContent = lr ? prettyResult(lr) : "-";
 
-  const bothDone = !!me.choice && !!op.choice;
-  btnNext.disabled = !bothDone;
+  // 次のラウンド：ホストのみ。結果が出たら押せる。
+  btnNext.disabled = !(isHost && endedThisRound);
 }
 
-/* [15] 10秒タイマー */
+/* [15] 10秒タイマー（毎R再起動、結果後停止） */
 function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
   if (localTimer) clearInterval(localTimer);
   lastBeepSec = null;
+
+  const ended = !!(roomData?.lastResult && roomData.lastResult._round === roomData.round);
+  if (ended){ timerEl.textContent = "OK"; return; }
+  if (myChoice && opChoice){ timerEl.textContent = "OK"; return; } // 両者提出済み
 
   const deadline = (roundStartMs || Date.now()) + TURN_TIME;
 
@@ -448,25 +457,26 @@ function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
     const sec = Math.ceil(remain/1000);
     timerEl.textContent = sec;
 
-    if (sec <= 3 && sec !== lastBeepSec && remain > 0) {
-      sfx.tick();
-      lastBeepSec = sec;
-    }
+    if (sec <= 3 && sec !== lastBeepSec && remain > 0) { sfx.tick(); lastBeepSec = sec; }
 
     if (remain <= 0){
       clearInterval(localTimer);
       sfx.timesup();
+      // P1のみが確定更新（多重決着防止）
       if (seat === "p1"){
-        await settleTimeout(roomData);
+        const dNow = roomData ?? (await get(child(ref(db), `rooms/${roomId}`))).val();
+        await settleTimeout(dNow);
       }
+      timerEl.textContent = "OK";
     }
   };
   tick();
   localTimer = setInterval(tick, 200);
 }
 
-/* [16] カード選択＆ヒント */
+/* [16] カード選択＆ヒント（提出後は選べない） */
 function pickCard(code){
+  if (roundLocked) return; // 既にこのラウンドは提出済み
   cardBtns.forEach(b => b.classList.remove("selected"));
   const btn = document.querySelector(`.cardBtn[data-card="${code}"]`);
   if (btn?.disabled) return;
@@ -489,33 +499,44 @@ function displayHint(code){
   }
 }
 
-/* [17] 提出と即時判定トリガ */
+/* [17] 提出（多重提出防止・UIロック） */
 async function submitCard(){
   if (!selectedCard) return;
+
+  // サーバ状態で最終確認（既に提出済みでないか）
   const meSnap = await get(child(ref(db), `rooms/${roomId}/players/${seat}`));
   let me = meSnap.val();
   if (!me) return;
-  if ((me.hand[selectedCard]||0) <= 0){
-    alert("そのカードはもうありません");
+  if (me.choice){
+    roundLocked = true;
+    btnPlay.disabled = true;
+    cardBtns.forEach(b => b.disabled = true);
+    alert("このターンは提出済みです");
     return;
   }
+
+  if ((me.hand[selectedCard]||0) <= 0){ alert("そのカードはもうありません"); return; }
   if (selectedCard === "SWAP"){
     const room = (await get(child(ref(db), `rooms/${roomId}`))).val();
     const diff = Math.abs(room.players.p1.pos - room.players.p2.pos);
     if (diff >= 8){ alert("差が8マス以上のため、位置交換カードは使えません"); return; }
   }
+
   const updates = {};
   updates[`rooms/${roomId}/players/${seat}/choice`] = selectedCard;
   updates[`rooms/${roomId}/players/${seat}/hand/${selectedCard}`] = (me.hand[selectedCard]||0) - 1;
   await update(ref(db), updates);
 
-  await settleIfReady();
+  // 提出直後にローカルUIもロック
+  roundLocked = true;
   selectedCard = null;
-  cardBtns.forEach(b => b.classList.remove("selected"));
+  cardBtns.forEach(b => { b.classList.remove("selected"); b.disabled = true; });
   btnPlay.disabled = true;
+
+  await settleIfReady(); // 両者出揃っていれば即判定
 }
 
-/* [18] タイムアウト決着 */
+/* [18] タイムアウト決着（結果後はタイマー停止） */
 async function settleIfReady(){
   const snap = await get(child(ref(db), `rooms/${roomId}`));
   if (!snap.exists()) return;
@@ -526,6 +547,9 @@ async function settleIfReady(){
   const result = judgeRound(p1, p2);
   await applyResult(d, result);
   playResultSfx(result);
+
+  if (localTimer) clearInterval(localTimer);
+  timerEl.textContent = "OK";
 }
 
 async function settleTimeout(roomData){
@@ -611,7 +635,7 @@ function playResultSfx(r){
   }
 }
 
-/* [20] 結果適用＆ラウンド遷移（8R以降の勝敗） */
+/* [20] 結果適用＆ラウンド遷移（ホストのみ進行） */
 async function applyResult(d, r){
   if (d.lastResult && d.lastResult._round === d.round) return;
 
@@ -636,6 +660,8 @@ async function applyResult(d, r){
 }
 
 async function nextRound(){
+  if (seat !== "p1") { alert("次のラウンド開始はホストのみです"); return; }
+
   const snap = await get(child(ref(db), `rooms/${roomId}`));
   if (!snap.exists()) return;
   const d = snap.val();
@@ -664,6 +690,11 @@ async function nextRound(){
     "players/p1/choice": null,
     "players/p2/choice": null
   });
+
+  // ローカルロック解除＆タイマー再起動準備
+  roundLocked = false;
+  selectedCard = null;
+  if (localTimer) { clearInterval(localTimer); localTimer = null; }
 }
 
 /* [21] 盤面ヘルパ */
@@ -694,12 +725,7 @@ function updateCounts(h){
   cntWIN.textContent = `×${h.WIN||0}`;
   cntSWAP.textContent = `×${h.SWAP||0}`;
   cntBARRIER.textContent = `×${h.BARRIER||0}`;
-  cardBtns.forEach(b=>{
-    const k = b.dataset.card;
-    const left = h[k]||0;
-    if (k==="SWAP"){ b.disabled = left<=0 || false; }
-    else{ b.disabled = left<=0; }
-  });
+  // Disable は renderGame 側で集中制御
 }
 function isBasic(x){ return x==="G"||x==="C"||x==="P"; }
 function gain(x){ return x==="G"?3:x==="C"?4:5; }
