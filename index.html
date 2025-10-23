@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="ja">
 <head>
+  <!-- [H1] 基本メタ -->
   <meta charset="utf-8" />
   <meta name="viewport"
         content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -9,51 +10,69 @@
   <meta name="theme-color" content="#ff99c8">
   <title>じゃんけんカード・レース</title>
 
-  <!-- ▼ PWA -->
+  <!-- [H2] PWA -->
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
 
-  <!-- AdSense Auto ads (あなたのクライアントIDでOK) -->
-  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3891016340964160"
-          crossorigin="anonymous"></script>
+  <!-- [H3] Google AdSense（オート広告）※ client はあなたの pub で固定 -->
+  <script async
+    src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3891016340964160"
+    crossorigin="anonymous"></script>
 
+  <!-- [H4] CSS -->
   <link rel="stylesheet" href="style.css" />
 
-  <!-- Firebase CDN (Modular v11) -->
+  <!-- [H5] Firebase CDN（モジュール）-->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
-    import { getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js";
-    import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-auth.js";
-    window.FirebaseAPI = { initializeApp, getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove, getAuth, signInAnonymously };
+    import { getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove }
+      from "https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js";
+    // app.js から使えるようにグローバルへ
+    window.FirebaseAPI = { initializeApp, getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove };
   </script>
 </head>
 <body>
-  <!-- 縦固定(9:16)の表示枠 -->
+  <!-- [B1] 縦固定(9:16)の表示枠 -->
   <div id="root9x16" class="root9x16">
     <main class="wrap">
+      <!-- [B2] ブランド／ヘッダ -->
       <header class="brand">
         <div class="brand__icon">🧸</div>
         <h1>じゃんけんカード・レース</h1>
         <p class="brand__sub">25マスでゴールを目指すよ（最低8ラウンド）</p>
       </header>
 
-      <!-- 参加 -->
+      <!-- [B3] 任意：ディスプレイ広告枠（手動）-->
+      <!-- Slot ID を入れて有効化してください（YOUR_SLOT_ID を置換）。-->
+      <section class="card" style="padding:4px 8px;">
+        <ins class="adsbygoogle"
+             style="display:block"
+             data-ad-client="ca-pub-3891016340964160"
+             data-ad-slot="5935056834"
+             data-ad-format="auto"
+             data-full-width-responsive="true"></ins>
+        <script>
+          (adsbygoogle = window.adsbygoogle || []).push({});
+        </script>
+      </section>
+
+      <!-- [B4] 参加カード -->
       <section id="auth" class="card">
         <div class="row">
           <input id="playerName" placeholder="名前（例：CHOI）" maxlength="12" />
         </div>
         <div class="row">
-          <button id="btnCreate" class="primary" disabled>🎉 部屋を作る</button>
+          <button id="btnCreate" class="primary">🎉 部屋を作る</button>
         </div>
         <div class="row">
           <input id="joinId" placeholder="部屋ID（6文字）" maxlength="6" />
-          <button id="btnJoin" disabled>入室</button>
+          <button id="btnJoin">入室</button>
         </div>
         <p class="help">友だちに部屋IDを共有してね。GitHub Pages でOK！</p>
       </section>
 
-      <!-- ロビー -->
+      <!-- [B5] ロビー -->
       <section id="lobby" class="card hidden">
         <p>部屋ID: <b id="roomIdLabel"></b> <button id="btnCopy" class="ghost">コピー</button></p>
         <p>プレイヤー: <span id="p1Label">-</span> vs <span id="p2Label">-</span></p>
@@ -63,7 +82,7 @@
         </div>
       </section>
 
-      <!-- ゲーム -->
+      <!-- [B6] ゲーム -->
       <section id="game" class="hidden">
         <div class="infoBar">
           <div>ラウンド <b id="roundNo">-</b> / <span id="minRounds">8</span>+</div>
@@ -71,7 +90,6 @@
           <div>差：<b id="diff">0</b>マス</div>
         </div>
 
-        <!-- 25マスのボード -->
         <div class="board" id="board"></div>
 
         <div class="status">
@@ -130,7 +148,7 @@
         </section>
 
         <div class="row">
-          <button id="btnNext">次のラウンド</button>
+          <button id="btnNext" class="hidden">次のラウンド</button>
           <button id="btnExit" class="warn">終了</button>
         </div>
       </section>
@@ -139,31 +157,16 @@
     </main>
   </div>
 
-  <!-- 結果／ゲーム終了 オーバーレイ -->
-  <div class="overlay hidden" id="overlay">
-    <div class="overlay-card">
-      <div class="overlay-title" id="overlayTitle">結果</div>
-      <div class="overlay-body">
-        <div id="overlayMsg">…</div>
-        <div class="overlay-count" id="overlayCount">3</div>
-      </div>
-      <div class="overlay-actions hidden" id="overlayActions">
-        <button id="btnReplay" class="primary">もう一回！</button>
-        <button id="btnExit2" class="warn">退室</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 横向き時のガード（縦に戻してね） -->
+  <!-- [B7] 横向き時のガード -->
   <div class="orientation-guard" id="orientationGuard">
-    <div class="og-card">
-      📱 画面を縦向きにしてください
-    </div>
+    <div class="og-card">📱 画面を縦向きにしてください</div>
   </div>
 
+  <!-- [B8] アプリ本体 -->
   <script type="module" src="app.js"></script>
+
+  <!-- [B9] Service Worker -->
   <script>
-    // Register service worker
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('./service-worker.js');
