@@ -84,14 +84,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db  = getDatabase(app);
 
-// --- 名前未入力はボタン無効化（1文字以上で有効） ---
-btnCreate.disabled = true;
-btnJoin.disabled   = true;
-playerName.addEventListener('input', () => {
-  const ok = playerName.value.trim().length >= 1;
-  btnCreate.disabled = !ok;
-  btnJoin.disabled   = !ok;
-});
+
 
 /* [04] DOM取得 */
 const $ = s => document.querySelector(s);
@@ -128,6 +121,15 @@ const btnExit    = $("#btnExit");
 
 const cardBtns   = [...document.querySelectorAll(".cardBtn")];
 const cntG       = $("#cntG"), cntC=$("#cntC"), cntP=$("#cntP"), cntWIN=$("#cntWIN"), cntSWAP=$("#cntSWAP"), cntBARRIER=$("#cntBARRIER");
+
+// --- 名前未入力はボタン無効化（1文字以上で有効） ---
+btnCreate.disabled = true;
+btnJoin.disabled   = true;
+playerName.addEventListener('input', () => {
+  const ok = playerName.value.trim().length >= 1;
+  btnCreate.disabled = !ok;
+  btnJoin.disabled   = !ok;
+});
 
 /* [05] 定数 */
 const BOARD_SIZE = 25;
