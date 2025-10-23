@@ -1,71 +1,188 @@
-*{box-sizing:border-box}
-html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; background:#fff5fa;color:#333}
-.hidden{display:none!important}
-.root9x16{position:relative;max-width:540px;margin:0 auto;height:100vh;display:flex;align-items:center;justify-content:center}
-.wrap{width:100%;padding:16px 14px}
-.brand{display:flex;align-items:center;gap:10px;margin:0 0 8px 0}
-.brand__icon{font-size:28px}
-.brand h1{font-size:18px;margin:0}
-.brand__sub{font-size:12px;margin:0;color:#666}
-.card{background:white;border-radius:14px;padding:12px 14px;box-shadow:0 8px 24px rgba(255,153,200,.25)}
-.row{display:flex;gap:8px;margin:8px 0}
-input{flex:1;padding:10px 12px;border-radius:12px;border:1px solid #ffd1e6;background:#fff}
-button{padding:10px 12px;border:none;border-radius:12px;background:#ffd1e6;cursor:pointer}
-button.primary{background:#ff99c8}
-button.warn{background:#ff6b6b;color:white}
-button.ghost{background:#f7f7f7}
-button:disabled{opacity:.5;cursor:not-allowed}
-.help{font-size:12px;color:#666;margin:6px 4px 0}
+/* ============ 基本 ============ */
+:root{
+  --bg: #fff5fa;
+  --surface: #ffffff;
+  --ink: #2e2a2a;
+  --muted: #6b6b6b;
+  --pink: #ff99c8;
+  --pink-2: #ffd1e6;
+  --blue: #8ecae6;
+  --shadow: 0 12px 40px rgba(0,0,0,.14);
+  --ring: 0 0 0 3px rgba(255,153,200,.25);
+}
 
-.infoBar{display:flex;justify-content:space-between;align-items:center;margin:8px 0 6px 0;font-size:14px}
-.board{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:10px 0}
-.cell{background:white;border-radius:10px;padding-top:70%;position:relative;box-shadow:inset 0 0 0 2px #ffe0ef}
-.cell.goal{box-shadow:inset 0 0 0 3px #ff99c8}
-/* ==== トークン（同マス時は半々の1個を出す） ==== */
+*{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html,body{ height:100%; margin:0; }
+html,body{ background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; }
+
+/* スクロール停止（PWAっぽく） */
+body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; }
+
+.hidden{ display:none !important; }
+
+.root9x16{
+  position: relative;
+  max-width: 520px;
+  height: 100svh; /* キーボードやアドレスバーの影響を最小化 */
+  margin: 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  padding: calc(env(safe-area-inset-top) + 8px) 10px calc(env(safe-area-inset-bottom) + 8px);
+}
+
+.wrap{
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 10px;
+}
+
+/* ============ ヘッダ ============ */
+.brand{ display:flex; align-items:center; gap:10px; }
+.brand__icon{ font-size: 28px; filter: drop-shadow(0 6px 16px rgba(0,0,0,.12)); }
+.brand__text h1{ font-size: 18px; margin: 0 0 2px; }
+.brand__sub{ font-size: 12px; margin: 0; color: var(--muted); }
+
+/* ============ カードUI ============ */
+.card{
+  background: linear-gradient(180deg, #fff, #fff9fc);
+  border-radius: 16px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  border: 1px solid #ffecf6;
+}
+
+.row{ display:flex; gap:8px; margin:8px 0; }
+.row--space{ justify-content: space-between; align-items: center; }
+
+.players{ display:flex; align-items:center; justify-content:center; gap:8px; margin: 8px 0 12px; }
+.pill{
+  padding: 6px 10px; border-radius: 999px; font-weight: 700; font-size: 13px;
+  background: #fff; border: 2px solid #eee;
+}
+.pill--me{ border-color: var(--pink); }
+.pill--op{ border-color: var(--blue); }
+.vs{ font-weight: 800; color:#aaa; }
+
+input{
+  flex:1; padding: 12px 12px;
+  border-radius: 12px; border: 1px solid var(--pink-2); background: #fff;
+  outline: none; font-size: 15px;
+}
+input:focus{ box-shadow: var(--ring); border-color: var(--pink); }
+
+button{
+  padding: 12px 12px; border: none; border-radius: 12px;
+  background: var(--pink-2); cursor: pointer; font-weight: 700;
+  transition: transform .02s ease, box-shadow .2s;
+}
+button:active{ transform: translateY(1px); }
+button.primary{ background: var(--pink); color: #fff; }
+button.warn{ background: #ff6b6b; color: white; }
+button.ghost{ background: #f6f6f6; }
+button:disabled{ opacity: .55; cursor: not-allowed; }
+
+.help{ font-size: 12px; color: var(--muted); margin: 6px 4px 0; }
+
+/* ============ ゲーム上部 ============ */
+.infoBar{
+  display:flex; justify-content:space-between; align-items:center;
+  margin: 6px 0 4px; font-size: 14px;
+  padding: 8px 10px;
+  background: #fff; border-radius: 12px; box-shadow: var(--shadow);
+}
+.timer b{ font-variant-numeric: tabular-nums; }
+
+/* ============ 盤面（ちょい小さめ） ============ */
+.board{
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  margin: 8px 0;
+}
+.cell{
+  position: relative;
+  background: radial-gradient(120% 100% at 100% 0%, #ffffff 0%, #fff5fb 60%, #ffe6f4 100%);
+  border-radius: 12px;
+  /* 少し小さめ：縦横比を 0.9 寄りで圧縮 */
+  aspect-ratio: 1/0.9;
+  box-shadow: inset 0 0 0 2px #ffe0ef;
+}
+.cell.goal{
+  box-shadow: inset 0 0 0 3px var(--pink), 0 0 0 2px rgba(255, 153, 200, .15);
+}
+
+/* コマ（少し小さめ＆重なり視認性UP） */
 .token{
-  position:absolute;
-  top:20%; left:20%; width:60%; height:60%;
-  border-radius:999px;
-  border:2px solid #fff;                 /* 縁取りで見やすく */
-  box-shadow:0 1px 3px rgba(0,0,0,.25);  /* ちょい立体 */
+  position: absolute;
+  width: 54%; height: 54%;
+  top: 23%; left: 23%;
+  border-radius: 999px;
+  outline: 2px solid #fff; /* 視認性アップ */
+  box-shadow: 0 6px 16px rgba(0,0,0,.18);
 }
-.token.me{ background:#ff99c8; }         /* ピンク（不透明） */
-.token.op{ background:#8ecae6; }         /* ブルー（不透明） */
+.token.me{ background: #ff99c8cc; }
+.token.op{ background: #8ecae6cc; }
 
-/* 同じマスに2人 → 半々の“duo”トークンを1個だけ置く */
-.token.duo{
-  display:flex; overflow:hidden;
-  top:20%; left:20%; width:60%; height:60%;
-  border-radius:999px; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,.25);
+/* ============ ステータス ============ */
+.status{ display:flex; gap:8px; margin:8px 0; }
+.chip{
+  background:white; border-radius:999px; padding:6px 10px;
+  box-shadow: 0 1px 0 rgba(0,0,0,.04); font-size: 13px;
 }
-.token.duo .half{ width:50%; height:100%; }
-.token.duo .half.a{ background:#ff99c8; }  /* 左半分ピンク */
-.token.duo .half.b{ background:#8ecae6; }  /* 右半分ブルー */
+.chip.me{ border:2px solid var(--pink); }
+.chip.op{ border:2px solid var(--blue); }
 
-.status{display:flex;gap:8px;margin:8px 0}
-.chip{background:white;border-radius:999px;padding:6px 10px;box-shadow:0 1px 0 rgba(0,0,0,.04)}
-.chip.me{border:2px solid #ff99c8}
-.chip.op{border:2px solid #8ecae6}
+/* ============ 手札（少し小さめ） ============ */
+h2.cute{ margin: 0 0 6px; font-size: 15px; }
+.handRow{ display:flex; gap:8px; margin:8px 0; }
+.cardBtn{
+  flex:1; display:flex; flex-direction:column; align-items:center; gap:4px;
+  background:white; border:2px solid transparent; border-radius:14px;
+  padding: 10px 6px; /* ← 少し小さく */
+  box-shadow: 0 8px 18px rgba(0,0,0,.06);
+}
+.cardBtn .emoji{ font-size: 22px; } /* ← 少し小さく */
+.cardBtn .label{ font-size: 12px; }
+.cardBtn .count{ font-size: 11px; color:#555; font-variant-numeric: tabular-nums; }
+.cardBtn.selected{ border-color:#ffb3cc; box-shadow: 0 0 0 4px rgba(255,179,204,.35); }
 
-h2.cute{margin:0 0 6px 0;font-size:15px}
-.handRow{display:flex;gap:8px;margin:8px 0}
-.cardBtn{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;background:white;box-shadow:0 8px 18px rgba(0,0,0,.06);border:2px solid transparent}
-.cardBtn .emoji{font-size:24px}
-.cardBtn .label{font-size:12px}
-.cardBtn .count{font-size:12px;color:#555}
-.cardBtn.selected{border-color:#ffb3cc; box-shadow:0 0 0 4px rgba(255,179,204,.35)}
+/* 結果プレビュー */
+.reveal.card{
+  display:flex; justify-content:space-between; gap:10px;
+  margin-top: 8px; font-size: 14px;
+}
 
-.reveal.card{display:flex;justify-content:space-between;gap:10px;margin-top:8px;font-size:14px}
+/* ============ フッタ & 広告 ============ */
+.footer{ text-align:center; color:#999; font-size:12px; }
+.ad-card{ padding:6px 8px; margin-top: 10px; }
 
-.orientation-guard{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.3);z-index:9999}
-.orientation-guard .og-card{background:white;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+/* ============ 向き警告 ============ */
+.orientation-guard{
+  position:fixed; inset:0; display:none;
+  align-items:center; justify-content:center;
+  background: rgba(0,0,0,.35); z-index: 9999;
+  backdrop-filter: blur(2px);
+}
+.orientation-guard .og-card{
+  background: #fff; border-radius: 14px; padding: 20px;
+  box-shadow: var(--shadow);
+}
 @media (orientation:landscape){
-  .orientation-guard{display:flex}
+  .orientation-guard{ display:flex; }
 }
 
-.overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9998}
-.overlay-card{width:min(92%,460px);background:white;border-radius:16px;padding:18px 16px;box-shadow:0 20px 60px rgba(0,0,0,.35);text-align:center}
-.overlay-title{font-size:18px;font-weight:700;margin-bottom:8px}
-.overlay-body{font-size:16px}
-.overlay-count{font-size:48px;font-weight:800;margin-top:6px}
-.overlay-actions{display:flex;gap:10px;justify-content:center;margin-top:12px}
+/* ============ 細かい調整 ============ */
+/* iOSボトムバー対策で最下部に余白 */
+.wrap{ padding-bottom: env(safe-area-inset-bottom); }
+
+/* 小さい端末でさらに少しだけ詰める */
+@media (max-width: 360px){
+  .card{ padding: 10px 12px; border-radius: 14px; }
+  .cell{ border-radius: 10px; }
+  .cardBtn{ padding: 9px 5px; }
+  .cardBtn .emoji{ font-size: 20px; }
+}
+
+/* Safariでスクロールバーを隠す（念のため） */
+::-webkit-scrollbar{ display:none; }

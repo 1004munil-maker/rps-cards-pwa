@@ -39,14 +39,16 @@
       <!-- [B2] ブランド／ヘッダ -->
       <header class="brand">
         <div class="brand__icon">🧸</div>
-        <h1>じゃんけんカード・レース</h1>
-        <p class="brand__sub">25マスでゴールを目指すよ（最低8ラウンド）</p>
+        <div class="brand__text">
+          <h1>じゃんけんカード・レース</h1>
+          <p class="brand__sub">20マスでゴールを目指すよ（最低8ラウンド）</p>
+        </div>
       </header>
 
       <!-- [B4] 参加カード -->
       <section id="auth" class="card">
         <div class="row">
-          <input id="playerName" placeholder="名前（例：CHOI）" maxlength="12" />
+          <input id="playerName" placeholder="名前（例：CHOI）" maxlength="12" autocomplete="off" />
         </div>
         <div class="row">
           <button id="btnCreate" class="primary">🎉 部屋を作る</button>
@@ -60,8 +62,15 @@
 
       <!-- [B5] ロビー -->
       <section id="lobby" class="card hidden">
-        <p>部屋ID: <b id="roomIdLabel"></b> <button id="btnCopy" class="ghost">コピー</button></p>
-        <p>プレイヤー: <span id="p1Label">-</span> vs <span id="p2Label">-</span></p>
+        <p class="row row--space">
+          <span>部屋ID: <b id="roomIdLabel"></b></span>
+          <button id="btnCopy" class="ghost">コピー</button>
+        </p>
+        <p class="players">
+          <span class="pill pill--me" id="p1Label">-</span>
+          <span class="vs">VS</span>
+          <span class="pill pill--op" id="p2Label">-</span>
+        </p>
         <div class="row">
           <button id="btnStart" class="primary">▶ 対戦開始</button>
           <button id="btnLeave" class="warn">退出</button>
@@ -79,8 +88,8 @@
         <div class="board" id="board"></div>
 
         <div class="status">
-          <div class="chip me">あなた：<b id="mePos">0</b>/<span>25</span></div>
-          <div class="chip op">相　手：<b id="opPos">0</b>/<span>25</span></div>
+          <div class="chip me">あなた：<b id="mePos">0</b>/<span id="boardSizeLabel">20</span></div>
+          <div class="chip op">相　手：<b id="opPos">0</b>/<span id="boardSizeLabel2">20</span></div>
         </div>
 
         <!-- 手札 -->
@@ -139,10 +148,10 @@
         </div>
       </section>
 
-      <footer><small>© 2025 RPS Cards — pastel & comfy 💗</small></footer>
+      <footer class="footer"><small>© 2025 RPS Cards — pastel & comfy 💗</small></footer>
 
       <!-- [B9] 手動ディスプレイ広告（ゲームの下 / 非固定） -->
-      <section class="card" style="padding:4px 8px; margin-top: 12px;">
+      <section class="ad-card card">
         <ins class="adsbygoogle"
              style="display:block"
              data-ad-client="ca-pub-3891016340964160"
@@ -153,8 +162,6 @@
           (adsbygoogle = window.adsbygoogle || []).push({});
         </script>
       </section>
-
-
     </main>
   </div>
 
