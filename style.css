@@ -20,7 +20,7 @@ html,body{
 }
 
 /* PWA風：スクロール抑制＆はみ出し対策 */
-body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; }
+body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; -webkit-user-select:none; user-select:none; }
 
 .hidden{ display:none !important; }
 
@@ -33,6 +33,7 @@ body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; }
   margin: 0 auto;
   display: flex; align-items: stretch; justify-content: center;
   padding: calc(env(safe-area-inset-top) + 8px) 10px calc(env(safe-area-inset-bottom) + 8px);
+  overflow: hidden; /* 上下バウンス抑止 */
 }
 
 .wrap{
@@ -40,6 +41,7 @@ body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; }
   display: grid;
   grid-template-rows: auto 1fr auto;
   gap: 10px;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 /* ============ ヘッダ ============ */
@@ -109,17 +111,19 @@ button:disabled{ opacity: .55; cursor: not-allowed; }
 }
 .timer b{ font-variant-numeric: tabular-nums; }
 
-/* ============ 盤面 10×2 ============ */
+/* ============ 盤面（常に10×2） ============ */
 .board{
   width: 100%;
   margin: 8px 0;
-}
-.board--10x2{
   display: grid;
-  grid-template-columns: repeat(10, 1fr); /* 10列 × 2行 */
-  grid-auto-rows: 1fr;
+  grid-template-columns: repeat(10, minmax(0,1fr)); /* ★10列固定 */
+  grid-auto-flow: row;
   gap: 6px;
+  contain: layout paint; /* 右端切れ/再レイアウトの安定化（Android対策） */
 }
+/* 互換：.board--10x2 を付けててもOK（同じ指定に合流） */
+.board--10x2{ grid-template-columns: repeat(10, minmax(0,1fr)); }
+
 .cell{
   position: relative;
   background: radial-gradient(120% 100% at 100% 0%, #ffffff 0%, #fff5fb 60%, #ffe6f4 100%);
@@ -135,11 +139,13 @@ button:disabled{ opacity: .55; cursor: not-allowed; }
 /* コマ（少し小さめ＆縁取りで視認性UP） */
 .token{
   position: absolute;
-  width: 48%; height: 48%; /* 以前より小さめ */
+  width: 48%; height: 48%;          /* 以前より小さめ */
   top: 26%; left: 26%;
   border-radius: 999px;
   outline: 2px solid #fff;
   box-shadow: 0 6px 16px rgba(0,0,0,.18);
+  pointer-events:none;              /* タップ拾わない */
+  will-change: transform;           /* オフセット時のチラつき抑制 */
 }
 .token.me{ background: #ff99c8d0; }
 .token.op{ background: #8ecae6d0; }
@@ -224,7 +230,13 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
 .help-modal__foot{ display:flex; justify-content:flex-end; gap:8px; margin-top: 10px; }
 
 /* ============ 細かい調整 ============ */
-.wrap{ padding-bottom: env(safe-area-inset-bottom); }
+/* 低背端末や横幅狭い端末で、盤面をさらに圧縮して“上切れ”を防ぐ */
+@media (max-height: 740px){
+  .cell{ aspect-ratio: 1 / 0.55; }
+}
+@media (max-height: 680px){
+  .cell{ aspect-ratio: 1 / 0.50; }
+}
 
 /* さらに小さい端末で詰める */
 @media (max-width: 360px){
@@ -236,3 +248,9 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
 
 /* スクロールバー非表示（念のため） */
 ::-webkit-scrollbar{ display:none; }
+
+/* アニメ少なめ指定の端末で影・拡大を弱める */
+@media (prefers-reduced-motion: reduce){
+  *{ transition:none!important; animation:none!important }
+  .card, .infoBar{ box-shadow: 0 6px 18px rgba(0,0,0,.12); }
+}
