@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#ff99c8">
+  <title>じゃんけんカード・レース</title>
+
+  <!-- ▼ PWA -->
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+
+  <!-- ▼ Optional: Google AdSense (Web only). Replace client and slot, then uncomment. -->
+  <!--
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXXXXXXX"
+          crossorigin="anonymous"></script>
+  -->
+
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Firebase CDN (Modular v11) -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
+    import { getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js";
+    window.FirebaseAPI = { initializeApp, getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove };
+  </script>
+</head>
+<body>
+  <!-- 縦固定(9:16)の表示枠 -->
+  <div id="root9x16" class="root9x16">
+    <main class="wrap">
+      <header class="brand">
+        <div class="brand__icon">🎀</div>
+        <h1>じゃんけんカード・レース</h1>
+        <p class="brand__sub">25マスでゴールを目指すよ（最低8ラウンド）</p>
+      </header>
+
+      <!-- AdSense display slot (optional) -->
+      <!--
+      <section class="card" style="padding:4px 8px;">
+        <ins class="adsbygoogle"
+             style="display:block"
+             data-ad-client="ca-pub-XXXXXXXXXXXXXXX"
+             data-ad-slot="YYYYYYYYYY"
+             data-ad-format="auto"
+             data-full-width-responsive="true"></ins>
+        <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
+      </section>
+      -->
+
+      <!-- 参加 -->
+      <section id="auth" class="card">
+        <div class="row">
+          <input id="playerName" placeholder="名前（例：CHOI）" maxlength="12" />
+        </div>
+        <div class="row">
+          <button id="btnCreate" class="primary">🎉 部屋を作る</button>
+        </div>
+        <div class="row">
+          <input id="joinId" placeholder="部屋ID（6文字）" maxlength="6" />
+          <button id="btnJoin">入室</button>
+        </div>
+        <p class="help">友だちに部屋IDを共有してね。GitHub Pages でOK！</p>
+      </section>
+
+      <!-- ロビー -->
+      <section id="lobby" class="card hidden">
+        <p>部屋ID: <b id="roomIdLabel"></b> <button id="btnCopy" class="ghost">コピー</button></p>
+        <p>プレイヤー: <span id="p1Label">-</span> vs <span id="p2Label">-</span></p>
+        <div class="row">
+          <button id="btnStart" class="primary">▶ 対戦開始</button>
+          <button id="btnLeave" class="warn">退出</button>
+        </div>
+      </section>
+
+      <!-- ゲーム -->
+      <section id="game" class="hidden">
+        <div class="infoBar">
+          <div>ラウンド <b id="roundNo">-</b> / <span id="minRounds">8</span>+</div>
+          <div class="timer">⏱ <b id="timer">10</b>s</div>
+          <div>差：<b id="diff">0</b>マス</div>
+        </div>
+
+        <!-- 25マスのボード -->
+        <div class="board" id="board"></div>
+
+        <div class="status">
+          <div class="chip me">あなた：<b id="mePos">0</b>/<span>25</span></div>
+          <div class="chip op">相　手：<b id="opPos">0</b>/<span>25</span></div>
+        </div>
+
+        <!-- 手札 -->
+        <section class="hand card">
+          <h2 class="cute">あなたのカード</h2>
+          <div class="handRow">
+            <button class="cardBtn" data-card="G">
+              <span class="emoji">✊</span>
+              <span class="label">グー</span>
+              <span class="count" id="cntG">×4</span>
+            </button>
+            <button class="cardBtn" data-card="C">
+              <span class="emoji">✌️</span>
+              <span class="label">チョキ</span>
+              <span class="count" id="cntC">×4</span>
+            </button>
+            <button class="cardBtn" data-card="P">
+              <span class="emoji">🫲</span>
+              <span class="label">パー</span>
+              <span class="count" id="cntP">×4</span>
+            </button>
+          </div>
+          <div class="handRow special">
+            <button class="cardBtn" data-card="WIN" title="どんな手にも勝つ（+4）※バリアに負け">
+              <span class="emoji">👑</span>
+              <span class="label">必勝</span>
+              <span class="count" id="cntWIN">×1</span>
+            </button>
+            <button class="cardBtn" data-card="SWAP" title="差が8未満なら位置を交換 ※バリアに負け">
+              <span class="emoji">🔁</span>
+              <span class="label">位置交換</span>
+              <span class="count" id="cntSWAP">×1</span>
+            </button>
+            <button class="cardBtn" data-card="BARRIER" title="相手の必勝/位置交換を防ぐ。通常手相手だと自分-1のペナルティ">
+              <span class="emoji">🛡️</span>
+              <span class="label">バリア</span>
+              <span class="count" id="cntBARRIER">×1</span>
+            </button>
+          </div>
+          <div class="row">
+            <button id="btnPlay" class="primary" disabled>このカードを出す</button>
+            <button id="btnClear" class="ghost">選択解除</button>
+          </div>
+          <p id="stateMsg" class="help">10秒以内に出してね（出さないと負け）</p>
+        </section>
+
+        <section class="reveal card">
+          <div>あなた：<span id="meChoice">？</span></div>
+          <div>相手　：<span id="opChoice">？</span></div>
+          <div>結果　：<b id="resultText">-</b></div>
+        </section>
+
+        <div class="row">
+          <button id="btnNext">次のラウンド</button>
+          <button id="btnExit" class="warn">終了</button>
+        </div>
+      </section>
+
+      <footer><small>© 2025 RPS Cards — pastel & comfy 💗</small></footer>
+    </main>
+  </div>
+
+  <!-- 横向き時のガード（縦に戻してね） -->
+  <div class="orientation-guard" id="orientationGuard">
+    <div class="og-card">
+      📱 画面を縦向きにしてください
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+  <script>
+    // Register service worker
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./service-worker.js');
+      });
+    }
+  </script>
+</body>
+</html>
