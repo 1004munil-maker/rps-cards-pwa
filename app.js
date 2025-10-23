@@ -73,7 +73,7 @@ const { initializeApp, getDatabase, ref, onValue, set, update, get, child, serve
 const firebaseConfig = {
   apiKey: "AIzaSyBfrZSzcdCazQii03POnM--fRRMOa5LEs0",
   authDomain: "rps-cards-pwa.firebaseapp.com",
-  databaseURL: "https://rps-cards-pwa-default-rtdb.firebaseio.com",
+  databaseURL: "https://rps-cards-pwa-default-rtdb.firebaseio.com/",
   projectId: "rps-cards-pwa",
   storageBucket: "rps-cards-pwa.appspot.com",
   messagingSenderId: "1080977402813",
