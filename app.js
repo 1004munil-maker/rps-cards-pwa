@@ -1,13 +1,29 @@
 /* =========================================================
-   RPS Cards — app.js（安定版・全面置き換え）
+   RPS Cards — app.js（安定版フル）
    ---------------------------------------------------------
-   重要変更点:
-   - BOARD_SIZE = 20
-   - 初期手札: G/C/P をランダム配分（合計12、各2以上）＋ WIN/SWAP/BARRIER 各1
-   - 相手の手はラウンド終了まで絶対に見えないUIに修正
-   - 3,2,1 の巨大カウントダウン → 正しい増減表示（自分視点）
-   - 同一マス重なり時はコマを左右にオフセットして見える
-   - 終局時に「もう一回」「退出」オーバーレイ
+   [01] モバイル対策
+   [02] 効果音（SFX）
+   [03] Firebase 初期化（CDN）
+   [04] DOM取得
+   [04.5] 名前必須ガード
+   [05] 定数
+   [06] 状態（提出/演出/ポーラー）
+   [07] 初期描画（盤面）
+   [08] イベント紐づけ
+   [09] 対戦前の広告（ネイティブ時のみ）
+   [10] ルーム作成/参加
+   [11] ロビー購読
+   [12] ゲーム開始
+   [13] 退出
+   [14] レンダリング（演出・入力制御）
+   [15] 10秒タイマー
+   [16] カード選択
+   [17] 提出→演出起動
+   [18] タイムアウト
+   [19] ルール＆SFX
+   [20] 結果適用→自動次R（p1）
+   [21] 盤面ヘルパ
+   [22] ユーティリティ（オーバーレイ/カウントダウン/ポーラー/再戦）
    ========================================================= */
 
 /* [01] モバイル対策 */
@@ -53,7 +69,7 @@ const sfx = new SFX();
 /* [03] Firebase 初期化（CDN） */
 const { initializeApp, getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove } = window.FirebaseAPI;
 
-// ★あなたの設定
+// ★あなたの設定（公開リポなら key ローテーション推奨）
 const firebaseConfig = {
   apiKey: "AIzaSyBfrZSzcdCazQii03POnM--fRRMOa5LEs0",
   authDomain: "rps-cards-pwa.firebaseapp.com",
@@ -114,14 +130,15 @@ if (playerName && btnCreate && btnJoin) {
 }
 
 /* [05] 定数 */
-const BOARD_SIZE = 20;      // ← 20マスに変更
+const BOARD_SIZE = 20;         // ★ 20マス
 const MIN_ROUNDS = 8;
-const TURN_TIME  = 10_000;  // ms
-const REVEAL_MS  = 3000;    // ms（3,2,1）
-const BASIC_TOTAL = 12;     // G/C/P 合計
-const BASIC_MIN   = 2;      // 各最低
+const TURN_TIME  = 10_000;     // ms
+const REVEAL_MS  = 3000;       // ms
+const BASIC_TOTAL = 12;        // G/C/P 合計
+const BASIC_MIN   = 2;         // 各最低枚数
+const SPECIALS    = { WIN:1, SWAP:1, BARRIER:1 };
 
-/* [06] 状態 */
+/* [06] 状態（提出/演出/ポーラー） */
 let myId = rid(6);
 let myName = "";
 let roomId = "";
@@ -134,15 +151,15 @@ let roundLocked = false;
 
 let curRoom = null;
 let overlayShownRound = 0;
-let revealApplyPoller = null;
-let countdownTicker = null;
+let revealApplyPoller = null;  // p1: 演出終了監視＆結果適用
+let countdownTicker = null;    // 両端末: 3,2,1 表示更新
 let overlayTimerId = null;
 let resultOverlayEl = null;
 
-/* [07] 盤面生成 */
+/* [07] 初期描画（盤面） */
 makeBoard();
 
-/* [08] イベント */
+/* [08] イベント紐づけ */
 if (btnCreate) btnCreate.onclick = async () => {
   sfx.click();
   const name = (playerName.value || "").trim();
@@ -203,7 +220,7 @@ if (btnClear) btnClear.onclick = () => {
 
 if (btnPlay) btnPlay.onclick = () => { sfx.play(); submitCard(); };
 
-/* [09] ネイティブ広告（任意） */
+/* [09] 対戦前の広告（ネイティブ時のみ） */
 async function maybeAdThenStart(){
   const showAd = Math.random() < 0.5;
   const isNative = !!window.Capacitor?.isNativePlatform;
@@ -227,24 +244,6 @@ async function maybeAdThenStart(){
 }
 
 /* [10] ルーム作成/参加 */
-function randomBasicCounts(total = BASIC_TOTAL, minEach = BASIC_MIN){
-  // 3種類に最低minEachを配って、残りをランダムに分配
-  let G = minEach, C = minEach, P = minEach;
-  let remain = total - 3*minEach; // 例: 12-6=6
-  while (remain > 0){
-    const r = Math.floor(Math.random()*3);
-    if (r === 0) G++;
-    else if (r === 1) C++;
-    else P++;
-    remain--;
-  }
-  return { G, C, P };
-}
-function randomHand(){
-  const {G, C, P} = randomBasicCounts();
-  return { G, C, P, WIN:1, SWAP:1, BARRIER:1 };
-}
-
 async function createRoom(id, name){
   await set(ref(db, `rooms/${id}`), {
     createdAt: serverTimestamp(),
@@ -256,28 +255,33 @@ async function createRoom(id, name){
     lastResult: null,
     revealRound: null,
     revealUntilMs: null,
-    // 再戦要求フラグ
-    rematch: { p1:false, p2:false },
+    rematchVotes: { p1:false, p2:false },
     players: {
       p1: { id: myId, name, pos: 0, choice: null, hand: randomHand(), joinedAt: serverTimestamp() },
-      // p2の手札は参加時にランダム化
       p2: { id: null, name: null, pos: 0, choice: null, hand: randomHand(), joinedAt: null }
     }
   });
 }
+
 async function joinRoom(id, name){
   name = (name || "").trim();
   if (!name) return { ok:false, reason:"NO_NAME" };
 
-  const snap = await get(child(ref(db), `rooms/${id}`));
+  const roomRef = ref(db, `rooms/${id}`);
+  const snap = await get(roomRef);
   if (!snap.exists()) return { ok:false, reason:"NO_ROOM" };
 
   const d = snap.val();
   if (d.players?.p2?.id) return { ok:false, reason:"FULL" };
 
-  await update(ref(db), `rooms/${id}/players/p2`, {
+  await update(ref(db, `rooms/${id}/players/p2`), {
     id: myId, name, pos: 0, choice: null, hand: randomHand(), joinedAt: serverTimestamp()
   });
+
+  // 念のため確認
+  const check = await get(child(roomRef, `players/p2/id`));
+  if (!check.exists()) return { ok:false, reason:"WRITE_FAIL" };
+
   return { ok:true };
 }
 
@@ -310,25 +314,21 @@ async function startGame(){
   if (!(hasP1 && hasP2)) { alert("2人そろってから開始できます"); return; }
   if (d.state === "playing") return;
 
-  const updates = {};
-  updates[`rooms/${roomId}/state`] = "playing";
-  updates[`rooms/${roomId}/round`] = 1;
-  updates[`rooms/${roomId}/roundStartMs`] = Date.now();
-  updates[`rooms/${roomId}/lastResult`] = null;
-  updates[`rooms/${roomId}/revealRound`] = null;
-  updates[`rooms/${roomId}/revealUntilMs`] = null;
-  updates[`rooms/${roomId}/rematch/p1`] = false;
-  updates[`rooms/${roomId}/rematch/p2`] = false;
-  updates[`rooms/${roomId}/players/p1/pos`] = 0;
-  updates[`rooms/${roomId}/players/p2/pos`] = 0;
-  updates[`rooms/${roomId}/players/p1/choice`] = null;
-  updates[`rooms/${roomId}/players/p2/choice`] = null;
-
-  // 再戦開始時は両者の基本手を新規ランダム配布
-  updates[`rooms/${roomId}/players/p1/hand`] = randomHand();
-  updates[`rooms/${roomId}/players/p2/hand`] = randomHand();
-
-  await update(ref(db), updates);
+  await update(ref(db, `rooms/${roomId}`), {
+    state: "playing",
+    round: 1,
+    roundStartMs: Date.now(),
+    lastResult: null,
+    revealRound: null,
+    revealUntilMs: null,
+    rematchVotes: { p1:false, p2:false },
+    "players/p1/pos": 0,
+    "players/p2/pos": 0,
+    "players/p1/choice": null,
+    "players/p2/choice": null,
+    "players/p1/hand": randomHand(),
+    "players/p2/hand": randomHand(),
+  });
 }
 
 /* [13] 退出 */
@@ -380,19 +380,14 @@ async function leaveRoom(){
 
 /* [14] レンダリング（演出・入力制御） */
 function renderGame(d){
-  // ロビー表示
-  const p1 = d.players?.p1 || {};
-  const p2 = d.players?.p2 || {};
-  p1Label.textContent = p1.name || "-";
-  p2Label.textContent = p2.name || "-";
-
-  // 状態に応じて画面切替
-  if (d.state === "playing" || d.state === "ended"){
+  // 画面切替
+  if (d.state === "lobby"){
+    auth.classList.add("hidden");
+    lobby.classList.remove("hidden");
+    game.classList.add("hidden");
+  } else {
     lobby.classList.add("hidden");
     game.classList.remove("hidden");
-  }else{
-    game.classList.add("hidden");
-    return;
   }
 
   roundNo.textContent = d.round ?? 0;
@@ -409,9 +404,14 @@ function renderGame(d){
   const endedThisRound = !!(d.lastResult && d.lastResult._round === d.round);
   const revealing      = (d.revealRound === d.round);
 
-  // 手札（自分だけ）、ボード
-  updateCounts(me.hand || {});
-  placeTokens(d.players.p1.pos|0, d.players.p2.pos|0, d.boardSize|0);
+  // ロビー表示
+  p1Label.textContent = d.players.p1?.name || "-";
+  p2Label.textContent = d.players.p2?.name || "-";
+  btnStart.disabled = !(seat==="p1" && d.players.p1?.id && d.players.p2?.id) || d.state!=="lobby";
+
+  // 手札・ボード
+  updateCounts(me.hand);
+  placeTokens(d.players.p1.pos, d.players.p2.pos, d.boardSize);
   mePosEl.textContent = seat==="p1" ? d.players.p1.pos : d.players.p2.pos;
   opPosEl.textContent = seat==="p1" ? d.players.p2.pos : d.players.p1.pos;
 
@@ -420,9 +420,12 @@ function renderGame(d){
     (seat==="p1"?d.players.p2.pos:d.players.p1.pos)
   );
 
-  // 相手の手はラウンド終了まで絶対非表示
-  meChoiceEl.textContent = iSubmitted ? toFace(me.choice) : "？";
-  opChoiceEl.textContent = endedThisRound ? (toFace(op.choice) || "？") : "？";
+  // 自分は自分の選択を表示、相手のは隠す（提出済みかだけ）
+  meChoiceEl.textContent = toFace(me.choice) || "？";
+  opChoiceEl.textContent = opSubmitted ? "⏳" : "？";
+  if (endedThisRound) {
+    // 結果が確定した後は非表示のままでもOK（演出で説明する）
+  }
 
   // SWAP使用可否（差が8以上は不可）
   const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
@@ -432,21 +435,21 @@ function renderGame(d){
   roundLocked = iSubmitted;
 
   // 入力可否
-  const disableBecause = (endedThisRound || revealing);
   cardBtns.forEach(b=>{
     const k = b.dataset.card;
-    const left = (me.hand?.[k]||0);
+    const left = me.hand[k]||0;
     const swapBlocked = (k==="SWAP" && diff>=8);
-    const disable = (left<=0) || iSubmitted || disableBecause;
+    const disable = (left<=0) || iSubmitted || endedThisRound || revealing || d.state!=="playing";
     b.disabled = swapBlocked ? true : disable;
     b.classList.toggle("selected", selectedCard === k && !disable && !swapBlocked);
   });
-  if (swapBtn) swapBtn.disabled = (me.hand?.SWAP||0)<=0 || diff >= 8 || iSubmitted || disableBecause;
-  if (btnPlay) btnPlay.disabled = !selectedCard || iSubmitted || disableBecause;
+  if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8 || iSubmitted || endedThisRound || revealing || d.state!=="playing";
+  if (btnPlay) btnPlay.disabled = !selectedCard || iSubmitted || endedThisRound || revealing || d.state!=="playing";
 
   // メッセージ
   if (d.state === "ended"){
-    stateMsg.textContent = "ゲーム終了！結果を確認してね。";
+    const w = d.lastResult?.winner;
+    stateMsg.textContent = w===null ? "🤝 引き分け。もう一回する？" : ( (w===meSeat) ? "🏆 勝利！" : "😢 敗北…" );
   } else if (revealing){
     const remain = Math.max(0, Math.ceil((d.revealUntilMs - Date.now())/1000));
     stateMsg.textContent = `判定まで… ${remain}s`;
@@ -458,38 +461,33 @@ function renderGame(d){
     stateMsg.textContent = "10秒以内に出してね（出さないと負け）";
   }
 
-  // タイマー（プレイ中のみ）
-  if (d.state === "playing"){
-    setupTimer(d.roundStartMs, d.round, me.choice, op.choice, d);
-  } else {
-    timerEl.textContent = "-";
-    if (localTimer) { clearInterval(localTimer); localTimer = null; }
-  }
+  // タイマー
+  setupTimer(d.roundStartMs, d.round, me.choice, op.choice, d);
 
-  // p1が演出開始
+  // 保険：両者提出 → p1 が演出開始
   if (bothSubmitted && seat==="p1" && !revealing && !endedThisRound && d.state==="playing"){
-    update(ref(db), {
-      [`rooms/${roomId}/revealRound`]: d.round,
-      [`rooms/${roomId}/revealUntilMs`]: Date.now() + REVEAL_MS
+    update(ref(db, `rooms/${roomId}`), {
+      revealRound: d.round,
+      revealUntilMs: Date.now() + REVEAL_MS
     });
   }
 
-  // 結果オーバーレイ（両端末）
+  // 結果オーバーレイ（全端末）
   if (endedThisRound && overlayShownRound !== d.round){
-    showResultOverlay(makeRoundSummary(d.lastResult), REVEAL_MS);
+    showResultOverlay(makeRoundSummary(d.lastResult, meSeat), REVEAL_MS);
     overlayShownRound = d.round;
   }
 
-  // 終局オーバーレイ（ボタン付き）
+  // 終局：再戦UI
   if (d.state === "ended"){
-    // winner判定
-    const winner = d.lastResult?.winner ?? null;
-    const meWin  = (winner === (seat==="p1"?"p1":"p2"));
-    const title  = winner===null ? "🤝 引き分け！" : (meWin ? "🏆 勝利！" : "😢 敗北…");
-
-    showEndOverlay(title);
+    showRematchOverlay(d);
   } else {
-    hideEndOverlay();
+    hideRematchOverlay();
+  }
+
+  // 次ラウンドでオーバーレイが残らないよう掃除
+  if (!endedThisRound && !revealing && overlayShownRound !== d.round){
+    hideResultOverlay();
   }
 }
 
@@ -500,7 +498,7 @@ function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
 
   const ended = !!(roomData?.lastResult && roomData.lastResult._round === roomData.round);
   const revealing = (roomData?.revealRound === roomData?.round);
-  if (ended || revealing || (myChoice && opChoice)){ timerEl.textContent = "OK"; return; }
+  if (roomData?.state==="ended" || ended || revealing || (myChoice && opChoice)){ timerEl.textContent = "OK"; return; }
 
   const deadline = (roundStartMs || Date.now()) + TURN_TIME;
 
@@ -548,7 +546,7 @@ function displayHint(code){
   }
 }
 
-/* [17] 提出 */
+/* [17] 提出→演出起動 */
 async function submitCard(){
   if (!selectedCard) return;
 
@@ -563,17 +561,17 @@ async function submitCard(){
     return;
   }
 
-  if ((me.hand?.[selectedCard]||0) <= 0){ alert("そのカードはもうありません"); return; }
+  if ((me.hand[selectedCard]||0) <= 0){ alert("そのカードはもうありません"); return; }
   if (selectedCard === "SWAP"){
     const room = (await get(child(ref(db), `rooms/${roomId}`))).val();
     const diff = Math.abs(room.players.p1.pos - room.players.p2.pos);
     if (diff >= 8){ alert("差が8マス以上のため、位置交換カードは使えません"); return; }
   }
 
-  const updates = {};
-  updates[`rooms/${roomId}/players/${seat}/choice`] = selectedCard;
-  updates[`rooms/${roomId}/players/${seat}/hand/${selectedCard}`] = (me.hand[selectedCard]||0) - 1;
-  await update(ref(db), updates);
+  await update(ref(db, `rooms/${roomId}/players/${seat}`), {
+    choice: selectedCard,
+    [`hand/${selectedCard}`]: (me.hand[selectedCard]||0) - 1
+  });
 
   // ローカルロック
   roundLocked = true;
@@ -581,6 +579,7 @@ async function submitCard(){
   cardBtns.forEach(b => { b.classList.remove("selected"); b.disabled = true; });
   if (btnPlay) btnPlay.disabled = true;
 
+  // 両者提出済みなら p1 が演出開始
   await tryStartRevealIfBothReady();
 }
 
@@ -592,9 +591,9 @@ async function tryStartRevealIfBothReady(){
   const both = !!p1.choice && !!p2.choice;
 
   if (both && seat === "p1" && d.revealRound !== d.round){
-    await update(ref(db), {
-      [`rooms/${roomId}/revealRound`]: d.round,
-      [`rooms/${roomId}/revealUntilMs`]: Date.now() + REVEAL_MS
+    await update(ref(db, `rooms/${roomId}`), {
+      revealRound: d.round,
+      revealUntilMs: Date.now() + REVEAL_MS
     });
   }
 }
@@ -609,11 +608,13 @@ async function settleTimeout(roomData){
   let result;
   if (!a && b){ result = winByDefault("p2", b, d); }
   else if (a && !b){ result = winByDefault("p1", a, d); }
-  else { result = { type:"timeout-tie", winner:null, delta:{p1:0,p2:0}, note:"両者未提出" }; }
+  else { result = { type:"timeout-tie", winner:null, delta:{p1:0,p2:0}, note:"両者未提出", _round:d.round }; }
+
+  if (!result._round) result._round = d.round;
 
   await applyResult(d, result);
   playResultSfx(result);
-  showResultOverlay(makeRoundSummary(result), REVEAL_MS);
+  showResultOverlay(makeRoundSummary(result, seat), REVEAL_MS);
   scheduleAutoNext(d);
 }
 function winByDefault(winnerSeat, card, d){
@@ -639,11 +640,12 @@ function winByDefault(winnerSeat, card, d){
 function judgeRound(p1, p2){
   const a = p1.choice, b = p2.choice;
 
+  // 必勝 vs 必勝 → 引き分け
   if (a==="WIN" && b==="WIN") {
     return { type:"win", winner:null, delta:{p1:0,p2:0}, note:"必勝同士" };
   }
 
-  // バリア vs 必勝/交換
+  // バリア vs 必勝/交換（防御側の勝ち、進まない）
   if (a==="BARRIER" && (b==="WIN"||b==="SWAP")) return { type:"barrier", winner:"p1", delta:{p1:0,p2:0}, barrier:true };
   if (b==="BARRIER" && (a==="WIN"||a==="SWAP")) return { type:"barrier", winner:"p2", delta:{p1:0,p2:0}, barrier:true };
 
@@ -654,7 +656,7 @@ function judgeRound(p1, p2){
   // バリア同士
   if (a==="BARRIER" && b==="BARRIER") return { type:"tie", winner:null, delta:{p1:0,p2:0} };
 
-  // 必勝
+  // 必勝（バリアでない限り+4）
   if (a==="WIN" && b!=="BARRIER") return { type:"win", winner:"p1", delta:{p1:4,p2:0} };
   if (b==="WIN" && a!=="BARRIER") return { type:"win", winner:"p2", delta:{p1:0,p2:4} };
 
@@ -693,25 +695,25 @@ function playResultSfx(r){
 async function applyResult(d, r){
   if (d.lastResult && d.lastResult._round === d.round) return;
 
-  let p1pos = d.players.p1.pos|0;
-  let p2pos = d.players.p2.pos|0;
+  let p1pos = d.players.p1.pos;
+  let p2pos = d.players.p2.pos;
 
   const posDiff = Math.abs(p1pos - p2pos);
   if (r.swap){
     if (posDiff < 8){ const tmp = p1pos; p1pos = p2pos; p2pos = tmp; }
   }else{
-    p1pos = clamp20(p1pos + (r.delta?.p1||0));
-    p2pos = clamp20(p2pos + (r.delta?.p2||0));
+    p1pos = clampN(p1pos + (r.delta?.p1||0), d.boardSize);
+    p2pos = clampN(p2pos + (r.delta?.p2||0), d.boardSize);
   }
   p1pos = Math.max(0, p1pos);
   p2pos = Math.max(0, p2pos);
 
-  await update(ref(db), {
-    [`rooms/${roomId}/players/p1/pos`]: p1pos,
-    [`rooms/${roomId}/players/p2/pos`]: p2pos,
-    [`rooms/${roomId}/lastResult`]: { ...r, _round: d.round },
-    [`rooms/${roomId}/revealRound`]: null,
-    [`rooms/${roomId}/revealUntilMs`]: null
+  await update(ref(db, `rooms/${roomId}`), {
+    [`players/p1/pos`]: p1pos,
+    [`players/p2/pos`]: p2pos,
+    lastResult: { ...r, _round: d.round },
+    revealRound: null,
+    revealUntilMs: null
   });
 }
 
@@ -721,14 +723,13 @@ function scheduleAutoNext(d){
     const snap = await get(child(ref(db), `rooms/${roomId}`));
     if (!snap.exists()) return;
     const cur = snap.val();
-    if (cur.state !== "playing") return;
 
     const roundsDone  = cur.round >= (cur.minRounds ?? MIN_ROUNDS);
     const someoneGoal = cur.players.p1.pos >= cur.boardSize || cur.players.p2.pos >= cur.boardSize;
 
-    const handLeft = (h)=> ((h.G|0)+(h.C|0)+(h.P|0)+(h.WIN|0)+(h.SWAP|0)+(h.BARRIER|0));
-    const p1left = handLeft(cur.players.p1.hand || {});
-    const p2left = handLeft(cur.players.p2.hand || {});
+    const handLeft = (h)=> (h.G+h.C+h.P+h.WIN+h.SWAP+h.BARRIER);
+    const p1left = handLeft(cur.players.p1.hand);
+    const p2left = handLeft(cur.players.p2.hand);
     const noCards = (p1left===0 || p2left===0);
 
     if ((roundsDone && someoneGoal) || (roundsDone && noCards)){
@@ -737,14 +738,15 @@ function scheduleAutoNext(d){
         state:"ended",
         lastResult: { ...(cur.lastResult||{}), final:true, winner }
       });
+      // 終局時は再戦オーバーレイで案内
       return;
     }
 
-    await update(ref(db), {
-      [`rooms/${roomId}/round`]: (cur.round||0)+1,
-      [`rooms/${roomId}/roundStartMs`]: Date.now(),
-      [`rooms/${roomId}/players/p1/choice`]: null,
-      [`rooms/${roomId}/players/p2/choice`]: null
+    await update(ref(db, `rooms/${roomId}`), {
+      round: (cur.round||0)+1,
+      roundStartMs: Date.now(),
+      "players/p1/choice": null,
+      "players/p2/choice": null
     });
     roundLocked = false;
     selectedCard = null;
@@ -771,25 +773,38 @@ function placeTokens(p1, p2, size){
   });
   const idx1 = Math.min(size, Math.max(0,p1)) - 1;
   const idx2 = Math.min(size, Math.max(0,p2)) - 1;
-  if (idx1<0 && idx2<0) return;
 
-  if (idx1===idx2 && idx1>=0){
-    // 同一マス：左右オフセットして両方見えるように
+  if (idx1>=0){
     const t1 = document.createElement("div");
     t1.className = "token me";
+    cells[idx1]?.appendChild(t1);
+  }
+  if (idx2>=0){
     const t2 = document.createElement("div");
     t2.className = "token op";
-    Object.assign(t1.style, { transform:"translateX(-6px)", position:"relative", zIndex:"2" });
-    Object.assign(t2.style, { transform:"translateX(6px)",  position:"relative", zIndex:"2" });
-    cells[idx1]?.appendChild(t1);
-    cells[idx1]?.appendChild(t2);
-  }else{
-    if (idx1>=0){ const t = document.createElement("div"); t.className = "token me"; cells[idx1]?.appendChild(t); }
-    if (idx2>=0){ const t = document.createElement("div"); t.className = "token op"; cells[idx2]?.appendChild(t); }
+    cells[idx2]?.appendChild(t2);
+  }
+  // 同マス重なり対処：左右にズラす
+  if (idx1>=0 && idx1===idx2){
+    const cell = cells[idx1];
+    cell.style.position = "relative";
+    const tm = cell.querySelector(".token.me");
+    const to = cell.querySelector(".token.op");
+    if (tm){ tm.style.position="relative"; tm.style.transform="translateX(-6px)"; tm.style.zIndex="2"; }
+    if (to){ to.style.position="relative"; to.style.transform="translateX(6px)"; to.style.zIndex="1"; }
   }
 }
 
-/* [22] ユーティリティ ＆ オーバーレイ */
+/* [22] ユーティリティ（オーバーレイ/カウントダウン/ポーラー/再戦） */
+function randomHand(){
+  // G/C/P を合計 BASIC_TOTAL でランダム配分（最低 BASIC_MIN 保証）
+  let rest = BASIC_TOTAL - BASIC_MIN*3;
+  let g = BASIC_MIN, c = BASIC_MIN, p = BASIC_MIN;
+  const add = [0,0,0];
+  for(let i=0;i<rest;i++){ add[Math.floor(Math.random()*3)]++; }
+  g += add[0]; c += add[1]; p += add[2];
+  return { G:g, C:c, P:p, ...SPECIALS };
+}
 function updateCounts(h){
   cntG.textContent = `×${h.G||0}`;
   cntC.textContent = `×${h.C||0}`;
@@ -801,171 +816,219 @@ function updateCounts(h){
 function isBasic(x){ return x==="G"||x==="C"||x==="P"; }
 function gain(x){ return x==="G"?3:x==="C"?4:5; }
 function toFace(x){ return x==="G"?"✊":x==="C"?"✌️":x==="P"?"🫲":x==="WIN"?"👑":x==="SWAP"?"🔁":x==="BARRIER"?"🛡️":null; }
-
-function myDelta(r){
-  // 自分視点の増減値
-  if (r.swap) return 0;
-  if (!r.delta) return 0;
-  return seat==="p1" ? (r.delta.p1||0) : (r.delta.p2||0);
-}
-function oppDelta(r){
-  if (r.swap) return 0;
-  if (!r.delta) return 0;
-  return seat==="p1" ? (r.delta.p2||0) : (r.delta.p1||0);
-}
-function makeRoundSummary(r){
-  if (r.swap) return "🔁 位置を交換！";
-  if (r.type === "barrier")        return "🛡️ バリア発動：必勝/位置交換を防ぎました";
-  if (r.type === "barrier-penalty"){
-    const meMoved = myDelta(r); // -1 か 0
-    return meMoved < 0 ? "🛡️ バリアのペナルティ：自分が -1 マス" : "🛡️ バリアのペナルティ：相手が -1 マス";
-  }
-  if (r.type === "win"){
-    const meWin = (r.winner === (seat==="p1"?"p1":"p2"));
-    return meWin ? "👑 必勝！ +4 マス" : "👑 相手の必勝… 相手が +4 マス";
-  }
-  if (r.type === "rps"){
-    const meWin = (r.winner === (seat==="p1"?"p1":"p2"));
-    if (!r.winner) return "🤝 あいこ";
-    return meWin ? `🎉 勝ち！ +${myDelta(r)} マス` : `😣 負け… 相手が +${oppDelta(r)} マス`;
-  }
-  if (r.type === "timeout"){
-    const meWin = (r.winner === (seat==="p1"?"p1":"p2"));
-    return meWin ? "⏱ 相手の時間切れで勝利！" : "⏱ 時間切れ…相手の勝ち";
-  }
-  if (r.type === "timeout-tie") return "⏱ 両者時間切れ";
-  if (r.type === "tie")         return "🤝 あいこ";
-  return "—";
-}
-
-function prettyResult(r){
+function prettyResult(r, seatKey){
   switch(r.type){
-    case "rps": return r.winner ? (r.winner==="p1"?"あなたの勝ち（通常手）":"相手の勝ち（通常手）") : "あいこ";
-    case "win": return r.winner ? (r.winner==="p1"?"あなたの必勝！+4":"相手の必勝！+4") : "必勝同士";
-    case "swap": return r.winner ? (r.winner==="p1"?"あなたが位置を交換！":"相手が位置を交換！") : "交換なし";
-    case "barrier": return r.winner ? (r.winner==="p1"?"あなたのバリアが防いだ":"相手のバリアが防いだ") : "バリア発動";
-    case "barrier-penalty": return "バリアのペナルティ：出した側が-1";
-    case "timeout": return r.winner ? (r.winner==="p1"?"相手の時間切れであなたの勝ち":"あなたの時間切れ…相手の勝ち") : "時間切れ";
+    case "rps": {
+      const myDelta = r.delta?.[seatKey] ?? 0;
+      const opDelta = r.delta?.[seatKey==="p1"?"p2":"p1"] ?? 0;
+      if (myDelta>0) return `あなたの勝ち！ +${myDelta} マス`;
+      if (opDelta>0) return `相手の勝ち… 相手が +${opDelta} マス`;
+      return "あいこ";
+    }
+    case "win": {
+      if (r.winner===seatKey) return "あなたの必勝！ +4";
+      if (r.winner) return "相手の必勝！ +4";
+      return "必勝同士";
+    }
+    case "swap": return "位置を交換！";
+    case "barrier": return (r.winner===seatKey) ? "あなたのバリアが防いだ" : "相手のバリアが防いだ";
+    case "barrier-penalty": {
+      const myDelta = r.delta?.[seatKey] ?? 0;
+      return myDelta<0 ? "バリアのペナルティ：あなたが -1" : "バリアのペナルティ：相手が -1";
+    }
+    case "timeout": {
+      if (r.winner===seatKey) return "相手の時間切れであなたの勝ち";
+      if (r.winner) return "あなたの時間切れ…相手の勝ち";
+      return "時間切れ";
+    }
     case "timeout-tie": return "両者時間切れ";
     case "tie": return "引き分け";
     default: return "-";
   }
 }
-
-function clamp20(x){ return Math.max(0, Math.min(20, x)); }
+function clampN(x,n){ return Math.max(0, Math.min(n, x)); }
 function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
 
-// === 共通オーバーレイ ===
-function ensureOverlay(id="overlayResult"){
-  let el = document.getElementById(id);
-  if (el) return el;
-  el = document.createElement("div");
-  el.id = id;
-  Object.assign(el.style, {
+// === 結果オーバーレイ ===
+function ensureOverlay(){
+  if (resultOverlayEl) return resultOverlayEl;
+  resultOverlayEl = document.createElement("div");
+  Object.assign(resultOverlayEl.style, {
     position:"fixed", inset:"0", background:"rgba(0,0,0,0.5)",
     display:"none", alignItems:"center", justifyContent:"center",
     zIndex:"9999", backdropFilter:"blur(2px)"
   });
   const inner = document.createElement("div");
-  inner.className = "overlayInner";
+  inner.id = "overlayInner";
   Object.assign(inner.style, {
     background:"#fff", borderRadius:"16px", padding:"24px 28px",
-    fontSize:"20px", textAlign:"center", minWidth:"260px",
-    boxShadow:"0 8px 24px rgba(0,0,0,.25)"
+    fontSize:"22px", textAlign:"center", minWidth:"260px",
+    boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700"
   });
-  el.appendChild(inner);
-  document.body.appendChild(el);
-  return el;
+  resultOverlayEl.appendChild(inner);
+  document.body.appendChild(resultOverlayEl);
+  return resultOverlayEl;
 }
-
-// 3,2,1 / ラウンド結果
 function showResultOverlay(text, ms=REVEAL_MS){
-  const el = ensureOverlay("overlayResult");
-  const inner = el.querySelector(".overlayInner");
-  inner.style.fontSize = "24px";
-  inner.innerText = text;
+  const el = ensureOverlay();
+  const inner = el.querySelector("#overlayInner");
+  inner.textContent = text;
+  inner.style.fontSize = "22px";
   el.style.display = "flex";
   if (overlayTimerId) clearTimeout(overlayTimerId);
   overlayTimerId = setTimeout(hideResultOverlay, ms);
 }
 function hideResultOverlay(){
-  const el = document.getElementById("overlayResult");
-  if (el) el.style.display = "none";
+  if (!resultOverlayEl) return;
+  resultOverlayEl.style.display = "none";
   if (overlayTimerId) { clearTimeout(overlayTimerId); overlayTimerId = null; }
 }
-
-// 終局（もう一回/退出）
-function showEndOverlay(title){
-  const el = ensureOverlay("overlayEnd");
-  const inner = el.querySelector(".overlayInner");
-  inner.style.fontSize = "22px";
-  inner.innerHTML = `
-    <div style="font-size:28px; margin-bottom:12px;">${title}</div>
-    <div style="display:flex; gap:12px; justify-content:center;">
-      <button id="btnRematch" class="primary" style="padding:10px 14px; font-size:16px;">もう一回</button>
-      <button id="btnEndLeave" class="warn" style="padding:10px 14px; font-size:16px;">退出</button>
-    </div>
-    <div id="rematchInfo" style="margin-top:8px; font-size:12px; color:#666;"></div>
-  `;
-  el.style.display = "flex";
-  const btnRematch = inner.querySelector("#btnRematch");
-  const btnEndLeave= inner.querySelector("#btnEndLeave");
-  const info       = inner.querySelector("#rematchInfo");
-
-  btnRematch.onclick = async ()=>{
-    if (seat === "p1"){
-      // ホストは即新規ゲーム開始
-      await startGame();
-      hideEndOverlay();
-    }else{
-      // ゲストはリクエスト表示だけ（ホストに任せる簡易仕様）
-      info.textContent = "ホストが『もう一回』を押すと開始します…";
-    }
-  };
-  btnEndLeave.onclick = ()=> leaveRoom();
-}
-function hideEndOverlay(){
-  const el = document.getElementById("overlayEnd");
-  if (el) el.style.display = "none";
-}
-
-// カウントダウン（巨大数字）表示
 function updateCountdownOverlay(){
   if (!curRoom) return;
-  if (curRoom.revealRound !== curRoom.round) { hideCountdownOnly(); return; }
+  if (curRoom.revealRound !== curRoom.round) { hideResultOverlay(); return; }
   const remain = Math.max(0, Math.ceil((curRoom.revealUntilMs - Date.now())/1000));
-  const el = ensureOverlay("overlayResult");
-  const inner = el.querySelector(".overlayInner");
+  const el = ensureOverlay();
+  const inner = el.querySelector("#overlayInner");
+  inner.textContent = remain>0 ? `${remain}` : "0";
   inner.style.fontSize = "64px";
-  inner.innerText = remain.toString();
   el.style.display = "flex";
 }
-function hideCountdownOnly(){
-  const el = document.getElementById("overlayResult");
-  if (el) el.style.display = "none";
+
+// ラウンド結果の要約（自分視点で対称表現）
+function makeRoundSummary(r, mySeat){
+  const seatKey = mySeat || (seat==="p1"?"p1":"p2");
+  if (r.swap) return "🔁 位置を交換！";
+  if (r.type === "barrier") return (r.winner===seatKey) ? "🛡️ バリアで防いだ！" : "🛡️ 相手のバリアが発動";
+  if (r.type === "barrier-penalty") {
+    const myDelta = r.delta?.[seatKey] ?? 0;
+    return myDelta<0 ? "🛡️ バリアのペナルティ：あなたが -1" : "🛡️ バリアのペナルティ：相手が -1";
+  }
+  if (r.type === "win") {
+    if (r.winner===seatKey) return "👑 必勝！ +4";
+    if (r.winner) return "👑 相手の必勝… +4";
+    return "👑 必勝同士";
+  }
+  if (r.type === "rps") {
+    const myDelta = r.delta?.[seatKey] ?? 0;
+    const opDelta = r.delta?.[seatKey==="p1"?"p2":"p1"] ?? 0;
+    if (myDelta>0) return `🎉 勝ち！ +${myDelta} マス`;
+    if (opDelta>0) return `😣 負け… 相手が +${opDelta} マス`;
+    return "🤝 あいこ";
+  }
+  if (r.type === "timeout") {
+    const meWin = (r.winner === seatKey);
+    return meWin ? "⏱ 相手の時間切れで勝利！" : "⏱ 時間切れ…相手の勝ち";
+  }
+  if (r.type === "timeout-tie") return "⏱ 両者時間切れ";
+  if (r.type === "tie") return "🤝 あいこ";
+  return "—";
 }
 
-// === ポーラー起動 ===
+// === ポーラー（p1の結果確定 / 両端末のカウントダウン表示 / 再戦合意監視） ===
 function ensurePollers(){
   // カウントダウン表示（両端末）
   if (!countdownTicker){
     countdownTicker = setInterval(()=>{ if (curRoom) updateCountdownOverlay(); }, 250);
   }
-  // p1だけ：演出終了したら必ず結果を適用
+  // p1だけ：演出終了したら必ず結果を適用／再戦合意で再開
   if (seat === "p1" && !revealApplyPoller){
     revealApplyPoller = setInterval(async ()=>{
-      if (!curRoom || curRoom.state !== "playing") return;
-      const d = curRoom;
-      const both = !!d.players.p1.choice && !!d.players.p2.choice;
-      const revealing = (d.revealRound === d.round);
-      const already = !!(d.lastResult && d.lastResult._round === d.round);
-      if (both && revealing && !already && Date.now() >= d.revealUntilMs){
-        const result = judgeRound(d.players.p1, d.players.p2);
-        await applyResult(d, result);
-        playResultSfx(result);
-        showResultOverlay(makeRoundSummary(result), REVEAL_MS);
-        scheduleAutoNext(d);
+      if (!curRoom) return;
+
+      // 演出終了→判定適用
+      if (curRoom.state==="playing"){
+        const d = curRoom;
+        const both = !!d.players.p1.choice && !!d.players.p2.choice;
+        const revealing = (d.revealRound === d.round);
+        const already = !!(d.lastResult && d.lastResult._round === d.round);
+        if (both && revealing && !already && Date.now() >= d.revealUntilMs){
+          const result = judgeRound(d.players.p1, d.players.p2);
+          result._round = d.round;
+          await applyResult(d, result);
+          playResultSfx(result);
+          showResultOverlay(makeRoundSummary(result, seat), REVEAL_MS);
+          scheduleAutoNext(d);
+        }
       }
-    }, 180);
+
+      // 再戦（両者合意）→新規試合
+      if (curRoom.state==="ended"){
+        const v = curRoom.rematchVotes || {p1:false,p2:false};
+        if (v.p1 && v.p2){
+          await startNewMatch(); // P1が一括リセット
+        }
+      }
+    }, 200);
   }
+}
+
+/* === 再戦系 === */
+function showRematchOverlay(d){
+  // 既に表示していれば更新のみ
+  let box = document.getElementById("rematchBox");
+  if (!box){
+    box = document.createElement("div");
+    box.id = "rematchBox";
+    Object.assign(box.style, {
+      position:"fixed", left:"50%", top:"50%", transform:"translate(-50%,-50%)",
+      background:"#fff", borderRadius:"14px", padding:"16px 18px", zIndex:"10000",
+      boxShadow:"0 8px 24px rgba(0,0,0,.25)", minWidth:"260px", textAlign:"center"
+    });
+    const h = document.createElement("div");
+    h.id="rematchTitle"; h.style.fontWeight="700"; h.style.fontSize="18px"; h.style.marginBottom="12px";
+    const p = document.createElement("div");
+    p.id="rematchStatus"; p.style.margin="8px 0 12px"; p.style.fontSize="13px"; p.style.color="#666";
+    const row = document.createElement("div"); row.style.display="flex"; row.style.gap="8px"; row.style.justifyContent="center";
+    const again = document.createElement("button"); again.textContent = "もう一回";
+    again.style.padding="10px 14px"; again.style.borderRadius="8px"; again.style.border="none"; again.style.background="#4caf50"; again.style.color="#fff"; again.style.fontWeight="700";
+    again.onclick = voteRematch;
+    const exit = document.createElement("button"); exit.textContent = "退出";
+    exit.style.padding="10px 14px"; exit.style.borderRadius="8px"; exit.style.border="none"; exit.style.background="#f44336"; exit.style.color="#fff"; exit.style.fontWeight="700";
+    exit.onclick = leaveRoom;
+    row.appendChild(again); row.appendChild(exit);
+    box.appendChild(h); box.appendChild(p); box.appendChild(row);
+    document.body.appendChild(box);
+  }
+  const w = d.lastResult?.winner;
+  const title = document.getElementById("rematchTitle");
+  const status = document.getElementById("rematchStatus");
+  title.textContent = (w===null) ? "🤝 引き分け！" : ((w===seat) ? "🏆 勝利！" : "😢 敗北…");
+  const v = d.rematchVotes || {p1:false,p2:false};
+  status.textContent = `再戦の同意：P1 ${v.p1?"✅":"—"} / P2 ${v.p2?"✅":"—"}`;
+  box.style.display = "block";
+}
+function hideRematchOverlay(){
+  const box = document.getElementById("rematchBox");
+  if (box) box.style.display = "none";
+}
+async function voteRematch(){
+  const key = seat; // "p1" or "p2"
+  await update(ref(db, `rooms/${roomId}/rematchVotes`), { [key]: true });
+}
+async function startNewMatch(){
+  // 新しい手札もランダム・ポジション/ラウンド初期化
+  await update(ref(db, `rooms/${roomId}`), {
+    state: "playing",
+    round: 1,
+    boardSize: BOARD_SIZE,
+    roundStartMs: Date.now(),
+    lastResult: null,
+    revealRound: null,
+    revealUntilMs: null,
+    rematchVotes: { p1:false, p2:false },
+    "players/p1/pos": 0,
+    "players/p2/pos": 0,
+    "players/p1/choice": null,
+    "players/p2/choice": null,
+    "players/p1/hand": randomHand(),
+    "players/p2/hand": randomHand(),
+  });
+  roundLocked = false;
+  selectedCard = null;
+  hideResultOverlay();
+}
+
+/* 小さい補助 */
+function prettyResultTextForLabel(r, mySeat){
+  return prettyResult(r, mySeat);
 }
