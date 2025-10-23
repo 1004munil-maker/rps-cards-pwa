@@ -15,7 +15,7 @@
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
 
-  <!-- [H3] Google AdSense（オート広告）※ client はあなたの pub で固定 -->
+  <!-- [H3] Google AdSense（オート広告） -->
   <script async
     src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3891016340964160"
     crossorigin="anonymous"></script>
@@ -38,11 +38,14 @@
     <main class="wrap">
       <!-- [B2] ブランド／ヘッダ -->
       <header class="brand">
-        <div class="brand__icon">🧸</div>
-        <div class="brand__text">
-          <h1>じゃんけんカード・レース</h1>
-          <p class="brand__sub">20マスでゴールを目指すよ（最低8ラウンド）</p>
+        <div class="brand__left">
+          <div class="brand__icon">🧸</div>
+          <div class="brand__text">
+            <h1>じゃんけんカード・レース</h1>
+            <p class="brand__sub">20マスでゴールを目指すよ（最低8ラウンド）</p>
+          </div>
         </div>
+        <button id="helpBtn" class="help-fab" aria-label="あそびかた">?</button>
       </header>
 
       <!-- [B4] 参加カード -->
@@ -85,7 +88,8 @@
           <div>差：<b id="diff">0</b>マス</div>
         </div>
 
-        <div class="board" id="board"></div>
+        <!-- ★ 10×2 グリッド -->
+        <div class="board board--10x2" id="board"></div>
 
         <div class="status">
           <div class="chip me">あなた：<b id="mePos">0</b>/<span id="boardSizeLabel">20</span></div>
@@ -170,10 +174,52 @@
     <div class="og-card">📱 画面を縦向きにしてください</div>
   </div>
 
+  <!-- [B7.5] ヘルプモーダル -->
+  <div id="helpModal" class="help-modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="help-modal__card">
+      <div class="help-modal__head">
+        <h3>あそびかた</h3>
+        <button id="helpClose" class="help-close" aria-label="閉じる">×</button>
+      </div>
+      <div class="help-modal__body">
+        <ol>
+          <li>各ラウンド10秒でカードを1枚提出。相手も同時に出すよ。</li>
+          <li>通常手：<b>✊グー(+3)</b> / <b>✌️チョキ(+4)</b> / <b>🫲パー(+5)</b>。勝った方がその数だけ進む。</li>
+          <li><b>👑必勝</b>：なんにでも勝って +4（ただし <b>🛡️バリア</b> には負け）</li>
+          <li><b>🔁位置交換</b>：差が <b>8未満</b> なら位置を入れ替え（<b>🛡️バリア</b> に負け）</li>
+          <li><b>🛡️バリア</b>：相手の必勝/位置交換を防ぐ。通常手相手だと自分に<b>-1</b>ペナルティ</li>
+          <li>両者未提出は時間切れ。表示に従って進行。</li>
+          <li>最低8R後、よりゴールに近い方が勝ち！再戦も選べるよ。</li>
+        </ol>
+        <p class="hint">※ 同じマスに止まったら、トークンは左右に分かれて表示されます。</p>
+      </div>
+      <div class="help-modal__foot">
+        <button class="primary" id="helpOk">OK</button>
+      </div>
+    </div>
+  </div>
+
   <!-- [B8] アプリ本体 -->
   <script type="module" src="app.js"></script>
 
-  <!-- [B9] Service Worker -->
+  <!-- [B9] ヘルプ開閉（app.js とは独立） -->
+  <script>
+    const $ = s => document.querySelector(s);
+    const helpBtn = $('#helpBtn'), helpModal = $('#helpModal');
+    const helpClose = $('#helpClose'), helpOk = $('#helpOk');
+
+    const openHelp = () => { helpModal.classList.remove('hidden'); helpModal.setAttribute('aria-hidden','false'); };
+    const closeHelp = () => { helpModal.classList.add('hidden'); helpModal.setAttribute('aria-hidden','true'); };
+
+    helpBtn?.addEventListener('click', openHelp);
+    helpClose?.addEventListener('click', closeHelp);
+    helpOk?.addEventListener('click', closeHelp);
+    helpModal?.addEventListener('click', (e)=>{ if(e.target===helpModal) closeHelp(); });
+    // 初回はヘルプを軽く案内（必要ならコメントアウト）
+    // window.addEventListener('load', ()=> setTimeout(openHelp, 600));
+  </script>
+
+  <!-- [B10] Service Worker -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {

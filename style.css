@@ -7,15 +7,19 @@
   --pink: #ff99c8;
   --pink-2: #ffd1e6;
   --blue: #8ecae6;
-  --shadow: 0 12px 40px rgba(0,0,0,.14);
   --ring: 0 0 0 3px rgba(255,153,200,.25);
+  --shadow: 0 14px 44px rgba(0,0,0,.14);
 }
 
 *{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html,body{ height:100%; margin:0; }
-html,body{ background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; }
+html,body{
+  background: radial-gradient(160% 140% at 100% 0%, #fff 0%, #fff6fb 50%, #ffeaf5 100%);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+}
 
-/* スクロール停止（PWAっぽく） */
+/* PWA風：スクロール抑制＆はみ出し対策 */
 body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; }
 
 .hidden{ display:none !important; }
@@ -23,25 +27,37 @@ body{ overflow: hidden; overscroll-behavior: none; touch-action: manipulation; }
 .root9x16{
   position: relative;
   max-width: 520px;
-  height: 100svh; /* キーボードやアドレスバーの影響を最小化 */
+  width: 100%;
+  height: 100dvh; /* iOSでも安定する最新単位 */
+  min-height: 100svh;
   margin: 0 auto;
-  display: flex; align-items: center; justify-content: center;
+  display: flex; align-items: stretch; justify-content: center;
   padding: calc(env(safe-area-inset-top) + 8px) 10px calc(env(safe-area-inset-bottom) + 8px);
 }
 
 .wrap{
   width: 100%;
-  height: 100%;
   display: grid;
   grid-template-rows: auto 1fr auto;
   gap: 10px;
 }
 
 /* ============ ヘッダ ============ */
-.brand{ display:flex; align-items:center; gap:10px; }
-.brand__icon{ font-size: 28px; filter: drop-shadow(0 6px 16px rgba(0,0,0,.12)); }
+.brand{
+  display:flex; align-items:center; justify-content:space-between;
+}
+.brand__left{ display:flex; align-items:center; gap:10px; }
+.brand__icon{ font-size: 28px; filter: drop-shadow(0 8px 18px rgba(0,0,0,.15)); }
 .brand__text h1{ font-size: 18px; margin: 0 0 2px; }
-.brand__sub{ font-size: 12px; margin: 0; color: var(--muted); }
+.brand__text .brand__sub{ font-size: 12px; margin: 0; color: var(--muted); }
+
+/* ヘルプFAB */
+.help-fab{
+  width: 36px; height: 36px; border-radius: 999px; border: none;
+  background: linear-gradient(180deg, #fff, #fff7fb);
+  box-shadow: 0 8px 22px rgba(0,0,0,.12), inset 0 0 0 2px #ffe8f3;
+  font-weight: 900; color: #ff5ca1; cursor: pointer;
+}
 
 /* ============ カードUI ============ */
 .card{
@@ -93,36 +109,40 @@ button:disabled{ opacity: .55; cursor: not-allowed; }
 }
 .timer b{ font-variant-numeric: tabular-nums; }
 
-/* ============ 盤面（ちょい小さめ） ============ */
+/* ============ 盤面 10×2 ============ */
 .board{
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
+  width: 100%;
   margin: 8px 0;
+}
+.board--10x2{
+  display: grid;
+  grid-template-columns: repeat(10, 1fr); /* 10列 × 2行 */
+  grid-auto-rows: 1fr;
+  gap: 6px;
 }
 .cell{
   position: relative;
   background: radial-gradient(120% 100% at 100% 0%, #ffffff 0%, #fff5fb 60%, #ffe6f4 100%);
   border-radius: 12px;
-  /* 少し小さめ：縦横比を 0.9 寄りで圧縮 */
-  aspect-ratio: 1/0.9;
+  aspect-ratio: 1 / 0.6;   /* 高さをさらに圧縮して全体を上に */
   box-shadow: inset 0 0 0 2px #ffe0ef;
+  overflow: hidden;        /* ★はみ出しを防ぐ（同マス時の飛び出し対策） */
 }
 .cell.goal{
   box-shadow: inset 0 0 0 3px var(--pink), 0 0 0 2px rgba(255, 153, 200, .15);
 }
 
-/* コマ（少し小さめ＆重なり視認性UP） */
+/* コマ（少し小さめ＆縁取りで視認性UP） */
 .token{
   position: absolute;
-  width: 54%; height: 54%;
-  top: 23%; left: 23%;
+  width: 48%; height: 48%; /* 以前より小さめ */
+  top: 26%; left: 26%;
   border-radius: 999px;
-  outline: 2px solid #fff; /* 視認性アップ */
+  outline: 2px solid #fff;
   box-shadow: 0 6px 16px rgba(0,0,0,.18);
 }
-.token.me{ background: #ff99c8cc; }
-.token.op{ background: #8ecae6cc; }
+.token.me{ background: #ff99c8d0; }
+.token.op{ background: #8ecae6d0; }
 
 /* ============ ステータス ============ */
 .status{ display:flex; gap:8px; margin:8px 0; }
@@ -139,10 +159,10 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
 .cardBtn{
   flex:1; display:flex; flex-direction:column; align-items:center; gap:4px;
   background:white; border:2px solid transparent; border-radius:14px;
-  padding: 10px 6px; /* ← 少し小さく */
+  padding: 10px 6px;
   box-shadow: 0 8px 18px rgba(0,0,0,.06);
 }
-.cardBtn .emoji{ font-size: 22px; } /* ← 少し小さく */
+.cardBtn .emoji{ font-size: 22px; }
 .cardBtn .label{ font-size: 12px; }
 .cardBtn .count{ font-size: 11px; color:#555; font-variant-numeric: tabular-nums; }
 .cardBtn.selected{ border-color:#ffb3cc; box-shadow: 0 0 0 4px rgba(255,179,204,.35); }
@@ -172,11 +192,41 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
   .orientation-guard{ display:flex; }
 }
 
+/* ============ ヘルプモーダル ============ */
+.help-modal{
+  position: fixed; inset: 0; z-index: 9998;
+  display: grid; place-items: center;
+  background: rgba(0,0,0,.45);
+  backdrop-filter: blur(2px);
+}
+.help-modal__card{
+  width: min(92%, 520px);
+  background: #fff;
+  border-radius: 16px;
+  padding: 14px 14px;
+  box-shadow: var(--shadow);
+  border: 1px solid #ffe8f3;
+}
+.help-modal__head{
+  display:flex; align-items:center; justify-content:space-between;
+  margin-bottom: 4px;
+}
+.help-modal__head h3{ margin: 0; font-size: 18px; }
+.help-close{
+  border:none; background:#f7f7f7; border-radius:10px; padding: 6px 10px; cursor: pointer;
+}
+.help-modal__body{
+  font-size: 14px; color: #444;
+}
+.help-modal__body ol{ margin: 8px 0 6px 20px; padding: 0; }
+.help-modal__body li{ margin: 4px 0; }
+.help-modal__body .hint{ font-size: 12px; color: #777; margin: 8px 0 0; }
+.help-modal__foot{ display:flex; justify-content:flex-end; gap:8px; margin-top: 10px; }
+
 /* ============ 細かい調整 ============ */
-/* iOSボトムバー対策で最下部に余白 */
 .wrap{ padding-bottom: env(safe-area-inset-bottom); }
 
-/* 小さい端末でさらに少しだけ詰める */
+/* さらに小さい端末で詰める */
 @media (max-width: 360px){
   .card{ padding: 10px 12px; border-radius: 14px; }
   .cell{ border-radius: 10px; }
@@ -184,5 +234,5 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
   .cardBtn .emoji{ font-size: 20px; }
 }
 
-/* Safariでスクロールバーを隠す（念のため） */
+/* スクロールバー非表示（念のため） */
 ::-webkit-scrollbar{ display:none; }
