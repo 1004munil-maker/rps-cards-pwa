@@ -1,29 +1,5 @@
 /* =========================================================
-   RPS Cards — app.js（安定版フル）
-   ---------------------------------------------------------
-   [01] モバイル対策
-   [02] 効果音（SFX）
-   [03] Firebase 初期化（CDN）
-   [04] DOM取得
-   [04.5] 名前必須ガード
-   [05] 定数
-   [06] 状態（提出/演出/ポーラー）
-   [07] 初期描画（盤面）
-   [08] イベント紐づけ
-   [09] 対戦前の広告（ネイティブ時のみ）
-   [10] ルーム作成/参加
-   [11] ロビー購読
-   [12] ゲーム開始
-   [13] 退出
-   [14] レンダリング（演出・入力制御）
-   [15] 10秒タイマー
-   [16] カード選択
-   [17] 提出→演出起動
-   [18] タイムアウト
-   [19] ルール＆SFX
-   [20] 結果適用→自動次R（p1）
-   [21] 盤面ヘルパ
-   [22] ユーティリティ（オーバーレイ/カウントダウン/ポーラー）
+   RPS Cards — app.js（安定版フル／デッドロック解消）
    ========================================================= */
 
 /* [01] モバイル対策 */
@@ -113,7 +89,6 @@ const opChoiceEl = $("#opChoice");
 const resultText = $("#resultText");
 const btnPlay    = $("#btnPlay");
 const btnClear   = $("#btnClear");
-// btnNext は自動進行のため未使用
 const btnExit    = $("#btnExit");
 
 const cardBtns   = [...document.querySelectorAll(".cardBtn")];
@@ -134,10 +109,10 @@ if (playerName && btnCreate && btnJoin) {
 const BOARD_SIZE = 25;
 const MIN_ROUNDS = 8;
 const TURN_TIME  = 10_000; // ms
-const REVEAL_MS  = 3000;   // ms
+const REVEAL_MS  = 3000;   // ms（3,2,1）
 const HAND_INIT  = { G:4, C:4, P:4, WIN:1, SWAP:1, BARRIER:1 };
 
-/* [06] 状態（提出/演出/ポーラー） */
+/* [06] 状態 */
 let myId = rid(6);
 let myName = "";
 let roomId = "";
@@ -148,12 +123,12 @@ let localTimer = null;
 let lastBeepSec = null;
 let roundLocked = false;
 
-let curRoom = null;            // 最新スナップショット（購読で更新）
-let overlayShownRound = 0;     // そのラウンドで結果オーバーレイを表示済みか
-let revealApplyPoller = null;  // p1のみ: 演出終了を監視して結果確定
-let countdownTicker = null;    // 全端末: カウントダウン表示更新
-let overlayTimerId = null;     // 結果オーバーレイ自動クローズ
-let resultOverlayEl = null;    // オーバーレイDOM
+let curRoom = null;
+let overlayShownRound = 0;
+let poller = null;         // 統合ポーラー（演出＆結果確定＆自動次R）
+let countdownTicker = null;
+let overlayTimerId = null;
+let resultOverlayEl = null;
 
 /* [07] 初期描画（盤面） */
 makeBoard();
@@ -166,13 +141,8 @@ if (btnCreate) btnCreate.onclick = async () => {
   myName = name;
   roomId = rid(6);
   seat = "p1";
-  try {
-    await createRoom(roomId, myName);
-    enterLobby();
-  } catch (e) {
-    console.error("createRoom failed:", e);
-    alert("部屋作成に失敗しました：" + (e?.message || e));
-  }
+  try { await createRoom(roomId, myName); enterLobby(); }
+  catch (e) { console.error("createRoom failed:", e); alert("部屋作成に失敗しました：" + (e?.message || e)); }
 };
 
 if (btnJoin) btnJoin.onclick = async () => {
@@ -180,10 +150,8 @@ if (btnJoin) btnJoin.onclick = async () => {
   const name = (playerName.value || "").trim();
   if (name.length < 1) { alert("名前を1文字以上入力してね"); playerName.focus(); return; }
   myName = name;
-
   roomId = (joinId.value || "").trim().toUpperCase();
   if (!roomId) { alert("部屋IDを入力してね"); joinId.focus(); return; }
-
   const res = await joinRoom(roomId, myName);
   if (!res.ok) {
     if (res.reason === "NO_ROOM") alert("部屋番号が存在しません");
@@ -203,7 +171,7 @@ if (btnCopy) btnCopy.onclick = () => {
   sfx.click();
 };
 
-if (btnStart) btnStart.onclick = async () => { await maybeAdThenStart(); };
+if (btnStart) btnStart.onclick = async () => { await startGame(); };
 if (btnLeave) btnLeave.onclick = () => { sfx.click(); leaveRoom(); };
 if (btnExit)  btnExit.onclick  = () => { sfx.click(); leaveRoom(); };
 
@@ -219,30 +187,7 @@ if (btnClear) btnClear.onclick = () => {
 
 if (btnPlay) btnPlay.onclick = () => { sfx.play(); submitCard(); };
 
-/* [09] 対戦前の広告（ネイティブ時のみ） */
-async function maybeAdThenStart(){
-  const showAd = Math.random() < 0.5;
-  const isNative = !!window.Capacitor?.isNativePlatform;
-  const AdMob = window.Capacitor?.Plugins?.AdMob;
-  if (isNative && showAd && AdMob){
-    try {
-      await AdMob.initialize({ requestTrackingAuthorization: true });
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-      const adId = isIOS
-        ? "ca-app-pub-3940256099942544/6978759866"
-        : "ca-app-pub-3940256099942544/5354046379";
-      await AdMob.prepareRewardedInterstitial({ adId });
-      await AdMob.showRewardedInterstitial();
-    } catch (e) {
-      console.warn("Ad error, start anyway:", e);
-    }
-    await startGame();
-    return;
-  }
-  await startGame();
-}
-
-/* [10] ルーム作成/参加 */
+/* [09] ルーム作成/参加 */
 async function createRoom(id, name){
   await set(ref(db, `rooms/${id}`), {
     createdAt: serverTimestamp(),
@@ -263,20 +208,17 @@ async function createRoom(id, name){
 async function joinRoom(id, name){
   name = (name || "").trim();
   if (!name) return { ok:false, reason:"NO_NAME" };
-
   const snap = await get(child(ref(db), `rooms/${id}`));
   if (!snap.exists()) return { ok:false, reason:"NO_ROOM" };
-
   const d = snap.val();
   if (d.players?.p2?.id) return { ok:false, reason:"FULL" };
-
   await update(ref(db, `rooms/${id}/players/p2`), {
     id: myId, name, pos: 0, choice: null, hand: HAND_INIT, joinedAt: serverTimestamp()
   });
   return { ok:true };
 }
 
-/* [11] ロビー購読 */
+/* [10] ロビー購読 */
 function enterLobby(){
   auth.classList.add("hidden");
   lobby.classList.remove("hidden");
@@ -287,55 +229,64 @@ function enterLobby(){
   unsubRoom = onValue(roomRef, (snap)=>{
     if (!snap.exists()) return;
     const d = snap.val();
-    curRoom = d;                       // ← 最新を保持
+    curRoom = d;
+
+    // 画面切り替え
+    const inGame = (d.state === "playing" || d.state === "ended");
+    if (inGame){ lobby.classList.add("hidden"); game.classList.remove("hidden"); }
+
+    // ロビー表示
+    if (!inGame){
+      const p1 = d.players?.p1 || {}, p2 = d.players?.p2 || {};
+      p1Label.textContent = p1.name || "-";
+      p2Label.textContent = p2.name || "-";
+      const isHost = (seat==="p1");
+      const twoJoined = !!p1.id && !!p2.id;
+      btnStart.disabled = !(isHost && twoJoined);
+      btnStart.textContent = isHost ? (twoJoined ? "▶ 対戦開始" : "相手待ち…") : "ホストが開始します";
+    }
+
     renderGame(d);
-    ensurePollers();                   // ← ポーラー起動（カウント/結果確定）
+    ensurePoller();  // 重要：どの端末でも演出＆結果確定＆自動次Rを進められる
   });
 }
 
-/* [12] ゲーム開始 */
+/* [11] ゲーム開始 */
 async function startGame(){
   const snap = await get(child(ref(db), `rooms/${roomId}`));
   if (!snap.exists()) { alert("部屋が見つかりません"); return; }
   const d = snap.val();
-
   if (seat !== "p1") { alert("ホストのみ開始できます"); return; }
   const hasP1 = !!d?.players?.p1?.id;
   const hasP2 = !!d?.players?.p2?.id;
   if (!(hasP1 && hasP2)) { alert("2人そろってから開始できます"); return; }
   if (d.state === "playing") return;
 
-  const updates = {};
-  updates[`rooms/${roomId}/state`] = "playing";
-  updates[`rooms/${roomId}/round`] = 1;
-  updates[`rooms/${roomId}/roundStartMs`] = Date.now();
-  updates[`rooms/${roomId}/lastResult`] = null;
-  updates[`rooms/${roomId}/revealRound`] = null;
-  updates[`rooms/${roomId}/revealUntilMs`] = null;
-  updates[`rooms/${roomId}/players/p1/pos`] = 0;
-  updates[`rooms/${roomId}/players/p2/pos`] = 0;
-  updates[`rooms/${roomId}/players/p1/choice`] = null;
-  updates[`rooms/${roomId}/players/p2/choice`] = null;
-  updates[`rooms/${roomId}/players/p1/hand`] = HAND_INIT;
-  updates[`rooms/${roomId}/players/p2/hand`] = HAND_INIT;
-
-  await update(ref(db), updates);
+  await update(ref(db), {
+    [`rooms/${roomId}/state`]: "playing",
+    [`rooms/${roomId}/round`]: 1,
+    [`rooms/${roomId}/roundStartMs`]: Date.now(),
+    [`rooms/${roomId}/lastResult`]: null,
+    [`rooms/${roomId}/revealRound`]: null,
+    [`rooms/${roomId}/revealUntilMs`]: null,
+    [`rooms/${roomId}/players/p1/pos`]: 0,
+    [`rooms/${roomId}/players/p2/pos`]: 0,
+    [`rooms/${roomId}/players/p1/choice`]: null,
+    [`rooms/${roomId}/players/p2/choice`]: null,
+    [`rooms/${roomId}/players/p1/hand`]: HAND_INIT,
+    [`rooms/${roomId}/players/p2/hand`]: HAND_INIT,
+  });
 }
 
-/* [13] 退出 */
+/* [12] 退出 */
 async function leaveRoom(){
   try {
     if (btnLeave) btnLeave.disabled = true;
     if (btnExit)  btnExit.disabled  = true;
 
     if (!roomId) { location.reload(); return; }
-
     const snap = await get(child(ref(db), `rooms/${roomId}`));
-    if (!snap.exists()) {
-      if (unsubRoom) unsubRoom();
-      location.reload();
-      return;
-    }
+    if (!snap.exists()) { if (unsubRoom) unsubRoom(); location.reload(); return; }
     const d = snap.val();
 
     if (seat === "p1") {
@@ -343,13 +294,12 @@ async function leaveRoom(){
     } else {
       const base = `rooms/${roomId}/players/p2`;
       const updates = {};
-      updates[`${base}/id`]       = null;
-      updates[`${base}/name`]     = null;
-      updates[`${base}/pos`]      = 0;
-      updates[`${base}/choice`]   = null;
-      updates[`${base}/hand`]     = HAND_INIT;
+      updates[`${base}/id`] = null;
+      updates[`${base}/name`] = null;
+      updates[`${base}/pos`] = 0;
+      updates[`${base}/choice`] = null;
+      updates[`${base}/hand`] = HAND_INIT;
       updates[`${base}/joinedAt`] = null;
-
       if (d.state === "playing") {
         updates[`rooms/${roomId}/state`]         = "lobby";
         updates[`rooms/${roomId}/round`]         = 0;
@@ -369,15 +319,13 @@ async function leaveRoom(){
   }
 }
 
-/* [14] レンダリング（演出・入力制御） */
+/* [13] レンダリング */
 function renderGame(d){
   roundNo.textContent = d.round ?? 0;
   minRoundsEl.textContent = d.minRounds ?? MIN_ROUNDS;
 
-  const meSeat = seat;
-  const opSeat = seat==="p1" ? "p2" : "p1";
-  const me = d.players[meSeat];
-  const op = d.players[opSeat];
+  const meSeat = seat, opSeat = (seat==="p1"?"p2":"p1");
+  const me = d.players[meSeat], op = d.players[opSeat];
 
   const iSubmitted     = !!me.choice;
   const opSubmitted    = !!op.choice;
@@ -385,75 +333,59 @@ function renderGame(d){
   const endedThisRound = !!(d.lastResult && d.lastResult._round === d.round);
   const revealing      = (d.revealRound === d.round);
 
-  // 手札・ボード
-  updateCounts(me.hand);
+  // ボード
+  updateCounts(me.hand || HAND_INIT);
   placeTokens(d.players.p1.pos, d.players.p2.pos, d.boardSize);
-  mePosEl.textContent = seat==="p1" ? d.players.p1.pos : d.players.p2.pos;
-  opPosEl.textContent = seat==="p1" ? d.players.p2.pos : d.players.p1.pos;
-
-  diffEl.textContent = Math.abs(
-    (seat==="p1"?d.players.p1.pos:d.players.p2.pos) -
-    (seat==="p1"?d.players.p2.pos:d.players.p1.pos)
-  );
+  mePosEl.textContent = (seat==="p1") ? d.players.p1.pos : d.players.p2.pos;
+  opPosEl.textContent = (seat==="p1") ? d.players.p2.pos : d.players.p1.pos;
+  diffEl.textContent  = Math.abs(d.players.p1.pos - d.players.p2.pos);
 
   meChoiceEl.textContent = toFace(me.choice) || "？";
   opChoiceEl.textContent = toFace(op.choice) || "？";
 
-  // SWAP使用可否（差が8以上は不可）
-  const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
-  const swapBtn = document.querySelector('.cardBtn[data-card="SWAP"]');
-
-  // ラウンド提出ロック
+  // カード入力状態
   roundLocked = iSubmitted;
-
-  // 入力可否
+  const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
   cardBtns.forEach(b=>{
     const k = b.dataset.card;
-    const left = me.hand[k]||0;
+    const left = (me.hand?.[k] ?? 0);
     const swapBlocked = (k==="SWAP" && diff>=8);
     const disable = (left<=0) || iSubmitted || endedThisRound || revealing;
     b.disabled = swapBlocked ? true : disable;
-    b.classList.toggle("selected", selectedCard === k && !disable && !swapBlocked);
+    b.classList.toggle("selected", selectedCard===k && !disable && !swapBlocked);
   });
-  if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8 || iSubmitted || endedThisRound || revealing;
+  const swapBtn = document.querySelector('.cardBtn[data-card="SWAP"]');
+  if (swapBtn) swapBtn.disabled = (me.hand?.SWAP<=0) || diff>=8 || iSubmitted || endedThisRound || revealing;
   if (btnPlay) btnPlay.disabled = !selectedCard || iSubmitted || endedThisRound || revealing;
 
   // メッセージ
-  if (revealing){
-    const remain = Math.max(0, Math.ceil((d.revealUntilMs - Date.now())/1000));
-    stateMsg.textContent = `判定まで… ${remain}s`;
-  } else if (endedThisRound){
-    stateMsg.textContent = "結果表示中… 次ラウンドへ進みます";
-  } else if (iSubmitted && !opSubmitted){
-    stateMsg.textContent = "提出済み！相手の手を待っています…";
-  } else {
-    stateMsg.textContent = "10秒以内に出してね（出さないと負け）";
-  }
+  if (revealing){ stateMsg.textContent = "判定準備中…"; }
+  else if (endedThisRound){ stateMsg.textContent = "結果表示中… 次ラウンドへ進みます"; }
+  else if (iSubmitted && !opSubmitted){ stateMsg.textContent = "提出済み！相手の手を待っています…"; }
+  else { stateMsg.textContent = "10秒以内に出してね（出さないと負け）"; }
 
   // タイマー
   setupTimer(d.roundStartMs, d.round, me.choice, op.choice, d);
 
-  // ここで保険：両者提出済み かつ 演出未設定 → p1が演出を開始
-  if (bothSubmitted && seat==="p1" && !revealing && !endedThisRound){
+  // 両者提出かつ演出未設定なら誰でも演出開始してよい（p1縛りを撤廃）
+  if (bothSubmitted && !revealing && !endedThisRound){
     update(ref(db), {
       [`rooms/${roomId}/revealRound`]: d.round,
       [`rooms/${roomId}/revealUntilMs`]: Date.now() + REVEAL_MS
     });
   }
 
-  // 結果オーバーレイ（全端末）：lastResultがこのRに来たら表示（片側だけ出ない問題対策）
+  // 結果オーバーレイ（このRで1回だけ）
   if (endedThisRound && overlayShownRound !== d.round){
     showResultOverlay(makeRoundSummary(d.lastResult), REVEAL_MS);
     overlayShownRound = d.round;
   }
-
-  // 次ラウンドでオーバーレイが残らないよう掃除
   if (!endedThisRound && !revealing && overlayShownRound !== d.round){
     hideResultOverlay();
   }
 }
 
-/* [15] 10秒タイマー */
+/* [14] 10秒タイマー */
 function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
   if (localTimer) clearInterval(localTimer);
   lastBeepSec = null;
@@ -474,8 +406,11 @@ function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
     if (remain <= 0){
       clearInterval(localTimer);
       sfx.timesup();
-      if (seat === "p1"){
-        const dNow = roomData ?? (await get(child(ref(db), `rooms/${roomId}`))).val();
+      // timeoutは誰でも確定して良い（二重はapplyResult側で抑止）
+      const dNowSnap = await get(child(ref(db), `rooms/${roomId}`));
+      if (!dNowSnap.exists()) return;
+      const dNow = dNowSnap.val();
+      if (!(dNow.players.p1.choice && dNow.players.p2.choice)){ // まだ両者提出じゃない
         await settleTimeout(dNow);
       }
       timerEl.textContent = "OK";
@@ -485,7 +420,7 @@ function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
   localTimer = setInterval(tick, 200);
 }
 
-/* [16] カード選択 */
+/* [15] カード選択 */
 function pickCard(code){
   if (roundLocked) return;
   const btn = document.querySelector(`.cardBtn[data-card="${code}"]`);
@@ -508,7 +443,7 @@ function displayHint(code){
   }
 }
 
-/* [17] 提出→演出起動 */
+/* [16] 提出 */
 async function submitCard(){
   if (!selectedCard) return;
 
@@ -523,7 +458,7 @@ async function submitCard(){
     return;
   }
 
-  if ((me.hand[selectedCard]||0) <= 0){ alert("そのカードはもうありません"); return; }
+  if ((me.hand?.[selectedCard]||0) <= 0){ alert("そのカードはもうありません"); return; }
   if (selectedCard === "SWAP"){
     const room = (await get(child(ref(db), `rooms/${roomId}`))).val();
     const diff = Math.abs(room.players.p1.pos - room.players.p2.pos);
@@ -540,42 +475,23 @@ async function submitCard(){
   selectedCard = null;
   cardBtns.forEach(b => { b.classList.remove("selected"); b.disabled = true; });
   if (btnPlay) btnPlay.disabled = true;
-
-  // 両者提出済みなら p1 が演出開始
-  await tryStartRevealIfBothReady();
 }
 
-async function tryStartRevealIfBothReady(){
-  const snap = await get(child(ref(db), `rooms/${roomId}`));
-  if (!snap.exists()) return;
-  const d = snap.val();
-  const p1 = d.players.p1, p2 = d.players.p2;
-  const both = !!p1.choice && !!p2.choice;
-
-  if (both && seat === "p1" && d.revealRound !== d.round){
-    await update(ref(db), {
-      [`rooms/${roomId}/revealRound`]: d.round,
-      [`rooms/${roomId}/revealUntilMs`]: Date.now() + REVEAL_MS
-    });
-  }
-}
-
-/* [18] タイムアウト */
-async function settleTimeout(roomData){
-  const d = roomData ?? (await get(child(ref(db), `rooms/${roomId}`))).val();
+/* [17] タイムアウト決着 */
+async function settleTimeout(d){
   const p1 = d.players.p1, p2 = d.players.p2;
   const a = p1.choice, b = p2.choice;
-  if (a && b) return; // 両者提出済 → 演出ルート
+  if (a && b) return; // 両者提出済 → 演出へ
 
   let result;
   if (!a && b){ result = winByDefault("p2", b, d); }
   else if (a && !b){ result = winByDefault("p1", a, d); }
   else { result = { type:"timeout-tie", winner:null, delta:{p1:0,p2:0}, note:"両者未提出" }; }
 
-  await applyResult(d, result);
+  await applyResultSafe(result); // ★ safe（最新DBを再確認して一度だけ）
   playResultSfx(result);
   showResultOverlay(makeRoundSummary(result), REVEAL_MS);
-  scheduleAutoNext(d);
+  await scheduleAutoNextSafe();
 }
 function winByDefault(winnerSeat, card, d){
   const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
@@ -596,16 +512,14 @@ function winByDefault(winnerSeat, card, d){
   return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0} };
 }
 
-/* [19] ルール＆SFX */
+/* [18] ルール＆SFX */
 function judgeRound(p1, p2){
   const a = p1.choice, b = p2.choice;
 
-  // ★追加：必勝 vs 必勝 は引き分け（移動なし）
-  if (a==="WIN" && b==="WIN") {
-    return { type:"win", winner:null, delta:{p1:0,p2:0}, note:"必勝同士" };
-  }
+  // WIN同士は引き分け
+  if (a==="WIN" && b==="WIN") return { type:"win", winner:null, delta:{p1:0,p2:0}, note:"必勝同士" };
 
-  // バリア vs 必勝/交換（防御側の勝ち、進まない）
+  // バリア vs 必勝/交換（進まない）
   if (a==="BARRIER" && (b==="WIN"||b==="SWAP")) return { type:"barrier", winner:"p1", delta:{p1:0,p2:0}, barrier:true };
   if (b==="BARRIER" && (a==="WIN"||a==="SWAP")) return { type:"barrier", winner:"p2", delta:{p1:0,p2:0}, barrier:true };
 
@@ -620,73 +534,68 @@ function judgeRound(p1, p2){
   if (a==="WIN" && b!=="BARRIER") return { type:"win", winner:"p1", delta:{p1:4,p2:0} };
   if (b==="WIN" && a!=="BARRIER") return { type:"win", winner:"p2", delta:{p1:0,p2:4} };
 
-  // 位置交換（差<8のみ有効、適用は applyResult 側）
-  if (a==="SWAP" && b!=="BARRIER"){ return { type:"swap", winner:"p1", swap:true }; }
-  if (b==="SWAP" && a!=="BARRIER"){ return { type:"swap", winner:"p2", swap:true }; }
-  if (a==="SWAP" && b==="SWAP") return { type:"tie", winner:null, delta:{p1:0,p2:0}, note:"ダブルSWAPは相殺" };
+  // 位置交換（差<8のみ有効）
+  if (a==="SWAP" && b!=="BARRIER") return { type:"swap", winner:"p1", swap:true };
+  if (b==="SWAP" && a!=="BARRIER") return { type:"swap", winner:"p2", swap:true };
+  if (a==="SWAP" && b==="SWAP")   return { type:"tie", winner:null, delta:{p1:0,p2:0}, note:"ダブルSWAPは相殺" };
 
   // 通常じゃんけん
   if (isBasic(a) && isBasic(b)){
     if (a===b) return { type:"tie", winner:null, delta:{p1:0,p2:0} };
     const aWin = (a==="G"&&b==="C")||(a==="C"&&b==="P")||(a==="P"&&b==="G");
-    if (aWin){ return { type:"rps", winner:"p1", delta:{p1: gain(a), p2:0} }; }
-    else{ return { type:"rps", winner:"p2", delta:{p1:0, p2: gain(b)} }; }
+    if (aWin) return { type:"rps", winner:"p1", delta:{p1: gain(a), p2:0} };
+    return { type:"rps", winner:"p2", delta:{p1:0, p2: gain(b)} };
   }
   return { type:"tie", winner:null, delta:{p1:0,p2:0} };
 }
-
 function playResultSfx(r){
   if (r.type==="swap"){ sfx.swap(); return; }
   if (r.type==="barrier"){ sfx.barrier(); return; }
   if (r.type==="barrier-penalty"){ sfx.penalty(); return; }
-  if (r.type==="win" || (r.type==="rps" && r.winner)){
+  if (r.type==="win" || (r.type==="rps" && r.winner) || r.type==="timeout"){
     const amIWinner = (r.winner === (seat==="p1"?"p1":"p2"));
     amIWinner ? sfx.win() : sfx.lose();
-    return;
-  }
-  if (r.type==="timeout"){
-    const amIWinner = (r.winner === (seat==="p1"?"p1":"p2"));
-    amIWinner ? sfx.win() : sfx.lose();
-    return;
   }
 }
 
-/* [20] 結果適用→自動次R（p1） */
-async function applyResult(d, r){
-  if (d.lastResult && d.lastResult._round === d.round) return;
+/* [19] 結果適用（安全版）＆ 自動次R（安全版） */
+async function applyResultSafe(result){
+  // 直前のDBを取得して、このラウンドが未確定なら反映
+  const snap = await get(child(ref(db), `rooms/${roomId}`));
+  if (!snap.exists()) return;
+  const d = snap.val();
+  if (d.lastResult && d.lastResult._round === d.round) return; // もう確定済み
 
   let p1pos = d.players.p1.pos;
   let p2pos = d.players.p2.pos;
-
   const posDiff = Math.abs(p1pos - p2pos);
-  if (r.swap){
+  if (result.swap){
     if (posDiff < 8){ const tmp = p1pos; p1pos = p2pos; p2pos = tmp; }
   }else{
-    p1pos = clamp25(p1pos + (r.delta?.p1||0));
-    p2pos = clamp25(p2pos + (r.delta?.p2||0));
+    p1pos = clamp25(p1pos + (result.delta?.p1||0));
+    p2pos = clamp25(p2pos + (result.delta?.p2||0));
   }
-  p1pos = Math.max(0, p1pos);
-  p2pos = Math.max(0, p2pos);
+  p1pos = Math.max(0, p1pos); p2pos = Math.max(0, p2pos);
 
   await update(ref(db), {
     [`rooms/${roomId}/players/p1/pos`]: p1pos,
     [`rooms/${roomId}/players/p2/pos`]: p2pos,
-    [`rooms/${roomId}/lastResult`]: { ...r, _round: d.round },
+    [`rooms/${roomId}/lastResult`]: { ...result, _round: d.round },
     [`rooms/${roomId}/revealRound`]: null,
     [`rooms/${roomId}/revealUntilMs`]: null
   });
 }
-
-function scheduleAutoNext(d){
-  if (seat !== "p1") return;
+async function scheduleAutoNextSafe(){
   setTimeout(async ()=>{
     const snap = await get(child(ref(db), `rooms/${roomId}`));
     if (!snap.exists()) return;
     const cur = snap.val();
 
+    // すでに次のラウンドに進んでいたら何もしない
+    if (!(cur.lastResult && cur.lastResult._round === cur.round)) return;
+
     const roundsDone  = cur.round >= (cur.minRounds ?? MIN_ROUNDS);
     const someoneGoal = cur.players.p1.pos >= cur.boardSize || cur.players.p2.pos >= cur.boardSize;
-
     const handLeft = (h)=> (h.G+h.C+h.P+h.WIN+h.SWAP+h.BARRIER);
     const p1left = handLeft(cur.players.p1.hand || HAND_INIT);
     const p2left = handLeft(cur.players.p2.hand || HAND_INIT);
@@ -694,14 +603,18 @@ function scheduleAutoNext(d){
 
     if ((roundsDone && someoneGoal) || (roundsDone && noCards)){
       const winner = cur.players.p1.pos===cur.players.p2.pos ? null : (cur.players.p1.pos>cur.players.p2.pos?"p1":"p2");
-      await update(ref(db, `rooms/${roomId}`), {
-        state:"ended",
-        lastResult: { ...(cur.lastResult||{}), final:true, winner }
-      });
-      showResultOverlay(winner===null ? "🤝 引き分け！" : (winner==="p1"?"🏆 勝利！":"😢 敗北…"), REVEAL_MS);
+      // 既にendedならスキップ
+      if (cur.state !== "ended"){
+        await update(ref(db), {
+          [`rooms/${roomId}/state`]: "ended",
+          [`rooms/${roomId}/lastResult`]: { ...(cur.lastResult||{}), final:true, winner }
+        });
+      }
+      showResultOverlay(winner===null ? "🤝 引き分け！" : (winner=== (seat==="p1"?"p1":"p2") ? "🏆 勝利！" : "😢 敗北…"), REVEAL_MS);
       return;
     }
 
+    // 次ラウンドが未だなら開始（誰が押してもOK／重複は上の“もう進んでたらreturn”で回避）
     await update(ref(db), {
       [`rooms/${roomId}/round`]: (cur.round||0)+1,
       [`rooms/${roomId}/roundStartMs`]: Date.now(),
@@ -714,7 +627,7 @@ function scheduleAutoNext(d){
   }, REVEAL_MS);
 }
 
-/* [21] 盤面ヘルパ */
+/* [20] 盤面ヘルパ */
 function makeBoard(){
   const el = document.getElementById('board');
   if (!el) return;
@@ -734,7 +647,7 @@ function placeTokens(p1, p2, size){
   if (idx2>=0){ const t = document.createElement("div"); t.className = "token op"; cells[idx2]?.appendChild(t); }
 }
 
-/* [22] ユーティリティ（オーバーレイ/カウントダウン/ポーラー） */
+/* [21] ユーティリティ（オーバーレイ等） */
 function updateCounts(h){
   cntG.textContent = `×${h.G||0}`;
   cntC.textContent = `×${h.C||0}`;
@@ -767,16 +680,16 @@ function ensureOverlay(){
   if (resultOverlayEl) return resultOverlayEl;
   resultOverlayEl = document.createElement("div");
   Object.assign(resultOverlayEl.style, {
-    position:"fixed", inset:"0", background:"rgba(0,0,0,0.5)",
+    position:"fixed", inset:"0", background:"rgba(0,0,0,0.55)",
     display:"none", alignItems:"center", justifyContent:"center",
     zIndex:"9999", backdropFilter:"blur(2px)"
   });
   const inner = document.createElement("div");
   inner.id = "overlayInner";
   Object.assign(inner.style, {
-    background:"#fff", borderRadius:"16px", padding:"20px 24px",
-    fontSize:"18px", textAlign:"center", minWidth:"240px",
-    boxShadow:"0 8px 24px rgba(0,0,0,.25)"
+    background:"rgba(255,255,255,0.9)", borderRadius:"16px", padding:"24px 28px",
+    fontSize:"22px", textAlign:"center", minWidth:"260px",
+    boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"600"
   });
   resultOverlayEl.appendChild(inner);
   document.body.appendChild(resultOverlayEl);
@@ -795,17 +708,22 @@ function hideResultOverlay(){
   resultOverlayEl.style.display = "none";
   if (overlayTimerId) { clearTimeout(overlayTimerId); overlayTimerId = null; }
 }
+// 大きな 3,2,1 を出す
+function showCountdownOverlay(remainSec){
+  const el = ensureOverlay();
+  const inner = el.querySelector("#overlayInner");
+  inner.style.fontSize = "64px";
+  inner.textContent = String(remainSec);
+  el.style.display = "flex";
+}
 function updateCountdownOverlay(){
   if (!curRoom) return;
   if (curRoom.revealRound !== curRoom.round) { hideResultOverlay(); return; }
   const remain = Math.max(0, Math.ceil((curRoom.revealUntilMs - Date.now())/1000));
-  const el = ensureOverlay();
-  const inner = el.querySelector("#overlayInner");
-  inner.textContent = `判定まで… ${remain}s`;
-  el.style.display = "flex";
+  showCountdownOverlay(remain);
 }
 
-// ラウンド結果の要約（自分視点で対称表現）
+// 視点に合わせた1行要約
 function makeRoundSummary(r){
   if (r.swap) return "🔁 位置を交換！";
   if (r.type === "barrier") return "🛡️ バリア発動：必勝/位置交換を防ぎました";
@@ -825,26 +743,38 @@ function makeRoundSummary(r){
   return "—";
 }
 
-// === ポーラー（p1の結果確定 / 両端末のカウントダウン表示） ===
-function ensurePollers(){
-  // カウントダウン表示（両端末）
+/* === 統合ポーラー（どの端末でも前進させる） === */
+function ensurePoller(){
   if (!countdownTicker){
-    countdownTicker = setInterval(()=>{ if (curRoom) updateCountdownOverlay(); }, 300);
+    countdownTicker = setInterval(()=>{ if (curRoom) updateCountdownOverlay(); }, 250);
   }
-  // p1だけ：演出終了したら必ず結果を適用
-  if (seat === "p1" && !revealApplyPoller){
-    revealApplyPoller = setInterval(async ()=>{
-      if (!curRoom || curRoom.state !== "playing") return;
+  if (!poller){
+    poller = setInterval(async ()=>{
+      if (!curRoom) return;
       const d = curRoom;
+      if (d.state !== "playing") return;
+
       const both = !!d.players.p1.choice && !!d.players.p2.choice;
       const revealing = (d.revealRound === d.round);
       const already = !!(d.lastResult && d.lastResult._round === d.round);
+
+      // 両者提出済みなのに演出未設定なら誰でも開始（冗長OK）
+      if (both && !revealing && !already){
+        await update(ref(db), {
+          [`rooms/${roomId}/revealRound`]: d.round,
+          [`rooms/${roomId}/revealUntilMs`]: Date.now() + REVEAL_MS
+        });
+        return;
+      }
+
+      // 演出が終わったら結果を誰でも1回だけ確定
       if (both && revealing && !already && Date.now() >= d.revealUntilMs){
         const result = judgeRound(d.players.p1, d.players.p2);
-        await applyResult(d, result);
+        await applyResultSafe(result);
         playResultSfx(result);
         showResultOverlay(makeRoundSummary(result), REVEAL_MS);
-        scheduleAutoNext(d);
+        await scheduleAutoNextSafe();
+        return;
       }
     }, 200);
   }
