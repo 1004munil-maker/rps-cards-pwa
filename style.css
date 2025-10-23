@@ -1,12 +1,3 @@
-/* =========================================================
-   RPS Cards — style.css（PWA最適化・10×2盤・Android右切れ修正）
-   - 端末幅にフィット（9:16固定はやめる）
-   - 盤面は常に 10×2（20マス）
-   - スクロール抑制／はみ出し根絶
-   - 同マス重なり時のはみ出し防止
-   - おしゃれ系UI（やさしいグラデ＆影）
-   ========================================================= */
-
 /* ============ 基本 ============ */
 :root{
   --bg: #fff5fa;
@@ -21,36 +12,33 @@
 }
 
 *{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html,body{ height:100%; margin:0; }
-html,body{
-  background: radial-gradient(160% 140% at 100% 0%, #fff 0%, #fff6fb 50%, #ffeaf5 100%);
-  color: var(--ink);
+html,body{ margin:0; height:100%; width:100%; background: radial-gradient(160% 140% at 100% 0%, #fff 0%, #fff6fb 50%, #ffeaf5 100%); color: var(--ink);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
-  overscroll-behavior: none;     /* iOS/Androidでの引っ張り無効 */
-  overflow-x: hidden;            /* 横はみ出し根絶（Android右切れ対策） */
 }
-img, video{ max-width:100%; height:auto; display:block; }
 
-body{ overflow: hidden; touch-action: manipulation; } /* PWA風：ページスクロール抑制 */
+/* PWA風：縦スクロールは抑制するが、横は「出さない」設計で裁く */
+html, body { overflow-x: hidden; }
+body{ overflow-y: hidden; overscroll-behavior: none; touch-action: manipulation; }
 
 .hidden{ display:none !important; }
 
-/* ============ ルート枠（幅可変・高さは安全ビューポート） ============ */
+/* 端末幅にフィット（Android右切れ対策） */
 .root9x16{
   position: relative;
-  width: 100%;
-  max-width: 520px;
-  height: 100svh;              /* アドレスバー揺れに強い */
-  min-height: 100dvh;          /* 互換フォールバック */
+  inline-size: min(520px, 100vw);             /* 基本 */
+  block-size: 100dvh; min-block-size: 100svh; /* アドレスバーの出入りに強い */
   margin-inline: auto;
   display: flex; align-items: stretch; justify-content: center;
 
-  /* Androidで右が切れるのを防ぎつつ安全域も確保 */
-  padding-left:  calc(max(env(safe-area-inset-left, 0px), 10px));
-  padding-right: calc(max(env(safe-area-inset-right, 0px), 10px));
-  padding-top:    calc(env(safe-area-inset-top, 0px) + 8px);
+  /* 左右は safe-area と 10px の大きい方を採用（iOS/Android両対応） */
+  padding-top: calc(env(safe-area-inset-top, 0px) + 8px);
   padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
-  box-sizing: border-box;
+  padding-left: max(10px, env(safe-area-inset-left, 0px));
+  padding-right: max(10px, env(safe-area-inset-right, 0px));
+}
+/* Chromeの新viewport単位が使えるならさらに厳密に */
+@supports (width: 100svw){
+  .root9x16{ inline-size: min(520px, 100svw); }
 }
 
 .wrap{
@@ -58,8 +46,8 @@ body{ overflow: hidden; touch-action: manipulation; } /* PWA風：ページス�
   display: grid;
   grid-template-rows: auto 1fr auto;
   gap: 10px;
-  min-height: 0;               /* 子グリッド溢れ防止 */
-  padding-bottom: env(safe-area-inset-bottom);
+  /* 横クリップはしない（右切れ原因になり得るため） */
+  overflow-x: visible;
 }
 
 /* ============ ヘッダ ============ */
@@ -71,7 +59,7 @@ body{ overflow: hidden; touch-action: manipulation; } /* PWA風：ページス�
 .brand__text h1{ font-size: 18px; margin: 0 0 2px; }
 .brand__text .brand__sub{ font-size: 12px; margin: 0; color: var(--muted); }
 
-/* ヘルプFAB（？ボタン） */
+/* ヘルプFAB */
 .help-fab{
   width: 36px; height: 36px; border-radius: 999px; border: none;
   background: linear-gradient(180deg, #fff, #fff7fb);
@@ -86,12 +74,13 @@ body{ overflow: hidden; touch-action: manipulation; } /* PWA風：ページス�
   padding: 12px 14px;
   box-shadow: var(--shadow);
   border: 1px solid #ffecf6;
+  min-width: 0; /* グリッド/フレックス子のはみ出し抑止 */
 }
 
-.row{ display:flex; gap:8px; margin:8px 0; }
+.row{ display:flex; gap:8px; margin:8px 0; min-width:0; }
 .row--space{ justify-content: space-between; align-items: center; }
 
-.players{ display:flex; align-items:center; justify-content:center; gap:8px; margin: 8px 0 12px; }
+.players{ display:flex; align-items:center; justify-content:center; gap:8px; margin: 8px 0 12px; min-width:0; }
 .pill{
   padding: 6px 10px; border-radius: 999px; font-weight: 700; font-size: 13px;
   background: #fff; border: 2px solid #eee;
@@ -104,13 +93,14 @@ input{
   flex:1; padding: 12px 12px;
   border-radius: 12px; border: 1px solid var(--pink-2); background: #fff;
   outline: none; font-size: 15px;
+  min-width: 0;
 }
 input:focus{ box-shadow: var(--ring); border-color: var(--pink); }
 
 button{
   padding: 12px 12px; border: none; border-radius: 12px;
   background: var(--pink-2); cursor: pointer; font-weight: 700;
-  transition: transform .02s ease, box-shadow .2s;
+  transition: transform .02s ease, box-shadow .2s; min-width:0;
 }
 button:active{ transform: translateY(1px); }
 button.primary{ background: var(--pink); color: #fff; }
@@ -126,39 +116,39 @@ button:disabled{ opacity: .55; cursor: not-allowed; }
   margin: 6px 0 4px; font-size: 14px;
   padding: 8px 10px;
   background: #fff; border-radius: 12px; box-shadow: var(--shadow);
+  min-width:0;
 }
 .timer b{ font-variant-numeric: tabular-nums; }
 
-/* ============ 盤面 10×2 ============ */
+/* ============ 盤面（デフォで10×2） ============ */
 .board{
   width: 100%;
   margin: 8px 0;
-  user-select: none;
-}
-.board--10x2{
   display: grid;
-  grid-template-columns: repeat(10, minmax(0, 1fr)); /* 10列 × 2行 */
-  grid-auto-rows: minmax(0, 1fr);
+  grid-template-columns: repeat(10, minmax(0, 1fr)); /* ★minmax(0,1fr)で横に溢れない */
+  grid-auto-rows: 1fr;
   gap: 6px;
+  margin-inline: auto;
+  max-width: 100%;
+  min-width: 0;
 }
-
-/* セル（横長めで上方向に圧縮、同マス時も飛び出さない） */
 .cell{
   position: relative;
   background: radial-gradient(120% 100% at 100% 0%, #ffffff 0%, #fff5fb 60%, #ffe6f4 100%);
   border-radius: 12px;
-  aspect-ratio: 1 / 0.6;   /* 高さをさらに圧縮して全体を上に */
+  aspect-ratio: 1 / 0.6;   /* 高さを圧縮して全体を上に */
   box-shadow: inset 0 0 0 2px #ffe0ef;
-  overflow: hidden;        /* ★同マス時のトークン飛び出し防止 */
+  overflow: hidden;        /* 同マス時の飛び出し対策 */
+  min-width: 0;
 }
 .cell.goal{
   box-shadow: inset 0 0 0 3px var(--pink), 0 0 0 2px rgba(255, 153, 200, .15);
 }
 
-/* コマ（少し小さめ＆縁取りで視認性UP） */
+/* コマ（小さめ＆縁取りで視認性UP） */
 .token{
   position: absolute;
-  width: 48%; height: 48%;  /* 以前より小さめ */
+  width: 48%; height: 48%;
   top: 26%; left: 26%;
   border-radius: 999px;
   outline: 2px solid #fff;
@@ -168,7 +158,7 @@ button:disabled{ opacity: .55; cursor: not-allowed; }
 .token.op{ background: #8ecae6d0; }
 
 /* ============ ステータス ============ */
-.status{ display:flex; gap:8px; margin:8px 0; }
+.status{ display:flex; gap:8px; margin:8px 0; min-width:0; }
 .chip{
   background:white; border-radius:999px; padding:6px 10px;
   box-shadow: 0 1px 0 rgba(0,0,0,.04); font-size: 13px;
@@ -178,12 +168,13 @@ button:disabled{ opacity: .55; cursor: not-allowed; }
 
 /* ============ 手札（少し小さめ） ============ */
 h2.cute{ margin: 0 0 6px; font-size: 15px; }
-.handRow{ display:flex; gap:8px; margin:8px 0; }
+.handRow{ display:flex; gap:8px; margin:8px 0; min-width:0; }
 .cardBtn{
   flex:1; display:flex; flex-direction:column; align-items:center; gap:4px;
   background:white; border:2px solid transparent; border-radius:14px;
   padding: 10px 6px;
   box-shadow: 0 8px 18px rgba(0,0,0,.06);
+  min-width: 0;
 }
 .cardBtn .emoji{ font-size: 22px; }
 .cardBtn .label{ font-size: 12px; }
@@ -198,10 +189,8 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
 
 /* ============ フッタ & 広告 ============ */
 .footer{ text-align:center; color:#999; font-size:12px; }
-.ad-card{ padding:6px 8px; margin-top: 10px; }
-
-/* Google AdSense はみ出し保険（Androidで起きがち） */
-.adsbygoogle { max-width: 100% !important; display:block !important; }
+.ad-card{ padding:6px 8px; margin-top: 10px; overflow:hidden; } /* 広告の横はみだし防止 */
+ins.adsbygoogle{ display:block; max-width:100% !important; box-sizing:border-box; }
 
 /* ============ 向き警告 ============ */
 .orientation-guard{
@@ -218,7 +207,7 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
   .orientation-guard{ display:flex; }
 }
 
-/* ============ ヘルプモーダル（？ボタン） ============ */
+/* ============ ヘルプモーダル ============ */
 .help-modal{
   position: fixed; inset: 0; z-index: 9998;
   display: grid; place-items: center;
@@ -249,9 +238,6 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
 .help-modal__body .hint{ font-size: 12px; color: #777; margin: 8px 0 0; }
 .help-modal__foot{ display:flex; justify-content:flex-end; gap:8px; margin-top: 10px; }
 
-/* ============ 細かい調整 ============ */
-.wrap{ padding-bottom: env(safe-area-inset-bottom); }
-
 /* さらに小さい端末で詰める */
 @media (max-width: 360px){
   .card{ padding: 10px 12px; border-radius: 14px; }
@@ -260,5 +246,5 @@ h2.cute{ margin: 0 0 6px; font-size: 15px; }
   .cardBtn .emoji{ font-size: 20px; }
 }
 
-/* スクロールバー非表示（念のため） */
+/* スクロールバー非表示（WebKit） */
 ::-webkit-scrollbar{ display:none; }
