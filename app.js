@@ -52,7 +52,7 @@ class SFX {
     osc.start(t0); osc.stop(t0+attack+dur+release+0.01);
   }
   click(){ this.tone({freq:900,dur:0.03,type:'square',gain:0.04}); }
-  play(){ this.tone({freq:660,dur=0.06,type:'triangle',gain:0.05}); } // ←dur=0.06 は '=' だとエラーになるので修正
+  play(){ this.tone({freq:660,dur:0.06,type:'triangle',gain:0.05}); } // ←dur=0.06 は '=' だとエラーになるので修正
   win(){ this.tone({freq:740,dur:0.09,type:'sine',gain:0.06}); setTimeout(()=>this.tone({freq:880,dur:0.09}),90); }
   lose(){ this.tone({freq:200,dur:0.12,type:'sawtooth',gain:0.05}); }
   swap(){ this.tone({freq:520,dur:0.06}); setTimeout(()=>this.tone({freq:420,dur:0.06}),70); }
