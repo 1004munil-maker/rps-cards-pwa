@@ -1,11 +1,11 @@
 /* =========================================================
-   RPS Cards — app.js（同期安定版・完全）
+   RPS Cards — app.js（同期安定版・リマッチ対応）
    ---------------------------------------------------------
    [01] モバイル対策
    [02] 効果音（SFX）
    [03] Firebase 初期化（CDN）
    [04] DOM取得
-   [05] 定数
+   [05] 定数（★BOARD_SIZE=20）
    [06] ローカル状態
    [07] 盤面初期描画
    [08] イベント紐づけ
@@ -15,7 +15,7 @@
    [12] レンダリング（UI/入力制御/オーバーレイ）
    [13] 提出処理
    [14] 判定/結果適用
-   [15] 次ラウンド・終了
+   [15] 次ラウンド・終了・リマッチ
    [16] ユーティリティ
    ========================================================= */
 
@@ -113,8 +113,8 @@ const btnExit     = $("#btnExit");
 const cardBtns    = $$(".cardBtn");
 const cntG        = $("#cntG"), cntC=$("#cntC"), cntP=$("#cntP"), cntWIN=$("#cntWIN"), cntSWAP=$("#cntSWAP"), cntBARRIER=$("#cntBARRIER");
 
-/* [05] 定数 */
-const BOARD_SIZE    = 25;
+/* [05] 定数（★BOARD_SIZE=20） */
+const BOARD_SIZE    = 20;
 const MIN_ROUNDS    = 8;
 const TURN_TIME     = 10_000; // 提出猶予
 const COUNTDOWN_MS  = 3000;   // 3,2,1
@@ -219,6 +219,8 @@ if (btnClear) btnClear.onclick = ()=>{
 if (btnPlay) btnPlay.onclick = ()=>{ sfx.play(); submitCard(); };
 
 /* [09] ルーム作成/参加 */
+function HAND_INIT(){ return { G:4, C:4, P:4, WIN:1, SWAP:1, BARRIER:1 }; }
+
 async function createRoom(id, name){
   await set(ref(db, `rooms/${id}`), {
     createdAt: serverTimestamp(),
@@ -231,6 +233,7 @@ async function createRoom(id, name){
     revealRound: null,
     revealUntilMs: null,
     showUntilMs: null,
+    rematch: { p1: false, p2: false }, // ★リマッチ投票
     players: {
       p1: { id: myId, name, pos: 0, choice: null, hand: HAND_INIT(), joinedAt: serverTimestamp() },
       p2: { id: null, name: null, pos: 0, choice: null, hand: HAND_INIT(), joinedAt: null }
@@ -290,64 +293,71 @@ function enterLobby(){
 function ensureLoops(){
   // UIタイカー（両端末）
   if (!uiTicker){
-    uiTicker = setInterval(()=>{
-      // 選択タイマー表示 + カウントダウンオーバーレイ更新
-      updateTimeAndOverlays();
-    }, 250);
+    uiTicker = setInterval(()=>{ updateTimeAndOverlays(); }, 250);
   }
 
   // p1のみ：進行管理
   if (seat === "p1" && !controllerTick){
     controllerTick = setInterval(async ()=>{
       const d = curRoom;
-      if (!d || d.state!=="playing") return;
+      if (!d) return;
 
-      const round = d.round||0;
-      const bothSubmitted = !!(d.players?.p1?.choice) && !!(d.players?.p2?.choice);
-      const deadline = (d.roundStartMs||0) + TURN_TIME;
-      const now = Date.now();
+      if (d.state === "playing"){
+        const round = d.round||0;
+        const bothSubmitted = !!(d.players?.p1?.choice) && !!(d.players?.p2?.choice);
+        const deadline = (d.roundStartMs||0) + TURN_TIME;
+        const now = Date.now();
 
-      const resultAlready = !!(d.lastResult && d.lastResult._round === round);
-      const countingDown  = (d.revealRound === round) && (now < (d.revealUntilMs||0));
-      const countdownEnded= (d.revealRound === round) && (now >= (d.revealUntilMs||0));
-      const showingResult = resultAlready && d.showUntilMs && now < d.showUntilMs;
-      const showEnded     = resultAlready && d.showUntilMs && now >= d.showUntilMs;
+        const resultAlready = !!(d.lastResult && d.lastResult._round === round);
+        const countingDown  = (d.revealRound === round) && (now < (d.revealUntilMs||0));
+        const countdownEnded= (d.revealRound === round) && (now >= (d.revealUntilMs||0));
+        const showingResult = resultAlready && d.showUntilMs && now < d.showUntilMs;
+        const showEnded     = resultAlready && d.showUntilMs && now >= d.showUntilMs;
 
-      // 1) タイムアウト → 勝敗確定（カウントダウン不要）
-      if (!resultAlready && !countingDown && !bothSubmitted && now >= deadline){
-        const result = judgeTimeout(d);               // 誰も/どちらか未提出
-        await applyResult(d, result);                 // lastResult + 位置/点
-        playResultSfxOnce(round, result);
-        await update(ref(db), { [`rooms/${roomId}/showUntilMs`]: now + RESULT_MS });
-        return;
+        // 1) タイムアウト → 勝敗確定
+        if (!resultAlready && !countingDown && !bothSubmitted && now >= deadline){
+          const result = judgeTimeout(d);
+          await applyResult(d, result);
+          playResultSfxOnce(round, result);
+          await update(ref(db), { [`rooms/${roomId}/showUntilMs`]: now + RESULT_MS });
+          return;
+        }
+
+        // 2) 両者提出 → カウントダウン開始
+        if (bothSubmitted && !resultAlready && !countingDown && d.revealRound !== round){
+          await update(ref(db), {
+            [`rooms/${roomId}/revealRound`]: round,
+            [`rooms/${roomId}/revealUntilMs`]: now + COUNTDOWN_MS
+          });
+          return;
+        }
+
+        // 3) カウントダウン終了 → 結果確定
+        if (bothSubmitted && countdownEnded && !resultAlready){
+          const result = judgeRound(d.players.p1, d.players.p2);
+          await applyResult(d, result);
+          playResultSfxOnce(round, result);
+          await update(ref(db), {
+            [`rooms/${roomId}/showUntilMs`]: now + RESULT_MS,
+            [`rooms/${roomId}/revealRound`]: null,
+            [`rooms/${roomId}/revealUntilMs`]: null
+          });
+          return;
+        }
+
+        // 4) 結果表示が終わった → 次R or 終了
+        if (showEnded){
+          await goNextOrFinish();
+          return;
+        }
       }
 
-      // 2) 両者提出 → カウントダウン開始（まだなら）
-      if (bothSubmitted && !resultAlready && !countingDown && d.revealRound !== round){
-        await update(ref(db), {
-          [`rooms/${roomId}/revealRound`]: round,
-          [`rooms/${roomId}/revealUntilMs`]: now + COUNTDOWN_MS
-        });
-        return;
-      }
-
-      // 3) カウントダウン終了 → 結果確定（まだなら）
-      if (bothSubmitted && countdownEnded && !resultAlready){
-        const result = judgeRound(d.players.p1, d.players.p2);
-        await applyResult(d, result);
-        playResultSfxOnce(round, result);
-        await update(ref(db), {
-          [`rooms/${roomId}/showUntilMs`]: now + RESULT_MS,
-          [`rooms/${roomId}/revealRound`]: null,
-          [`rooms/${roomId}/revealUntilMs`]: null
-        });
-        return;
-      }
-
-      // 4) 結果表示が終わった → 次R or 終了
-      if (showEnded){
-        await goNextOrFinish();
-        return;
+      // === state: ended → リマッチ制御 ===
+      if (d.state === "ended"){
+        // 両者が「もう一回」を押したら、p1がリセットして開始
+        if (d.rematch?.p1 && d.rematch?.p2){
+          await resetMatchFromEnded();
+        }
       }
     }, 200);
   }
@@ -383,14 +393,13 @@ function renderGame(d){
   // このラウンドの状態
   const now = Date.now();
   const round = d.round||0;
-  const deadline = (d.roundStartMs||0) + TURN_TIME;
 
   const bothSubmitted = !!me?.choice && !!op?.choice;
   const resultAlready = !!(d.lastResult && d.lastResult._round === round);
   const countingDown  = (d.revealRound === round) && (now < (d.revealUntilMs||0));
   const showingResult = resultAlready && d.showUntilMs && now < d.showUntilMs;
 
-  // 入力ロック：提出済 or カウントダウン中 or 結果中 or 結果確定済
+  // 入力ロック：提出済 or カウントダウン中 or 結果中 or 結果確定済 or 終了
   roundLocked = !!me?.choice;
   const disableAll = roundLocked || countingDown || showingResult || resultAlready || d.state!=="playing";
 
@@ -404,9 +413,9 @@ function renderGame(d){
   if (btnPlay) btnPlay.disabled = disableAll || !selectedCard;
 
   if (stateMsg){
-    if (d.state!=="playing") stateMsg.textContent = "ロビーで相手を待っています…";
-    else if (countingDown)   stateMsg.textContent = "判定までカウントダウン中…";
-    else if (showingResult)  stateMsg.textContent = "結果表示中…";
+    if (d.state==="ended") stateMsg.textContent = "試合終了";
+    else if (countingDown) stateMsg.textContent = "判定までカウントダウン中…";
+    else if (showingResult) stateMsg.textContent = "結果表示中…";
     else if (roundLocked && !bothSubmitted) stateMsg.textContent = "提出済み！相手を待っています…";
     else stateMsg.textContent = "10秒以内に出してね（出さないと負け）";
   }
@@ -539,8 +548,8 @@ async function applyResult(d, r){
   if (r.swap){
     const tmp = p1pos; p1pos = p2pos; p2pos = tmp; // バリアでない限り常に交換
   }else{
-    p1pos = clamp25(p1pos + (r.delta?.p1||0));
-    p2pos = clamp25(p2pos + (r.delta?.p2||0));
+    p1pos = clampToBoard(p1pos + (r.delta?.p1||0), d.boardSize);
+    p2pos = clampToBoard(p2pos + (r.delta?.p2||0), d.boardSize);
   }
   p1pos = Math.max(0, p1pos);
   p2pos = Math.max(0, p2pos);
@@ -552,7 +561,7 @@ async function applyResult(d, r){
   });
 }
 
-/* [15] 次ラウンド・終了 */
+/* [15] 次ラウンド・終了・リマッチ */
 async function startGame(){
   const snap = await get(child(ref(db), `rooms/${roomId}`));
   if (!snap.exists()){ alert("部屋が見つかりません"); return; }
@@ -570,6 +579,8 @@ async function startGame(){
   updates[`rooms/${roomId}/revealRound`] = null;
   updates[`rooms/${roomId}/revealUntilMs`] = null;
   updates[`rooms/${roomId}/showUntilMs`] = null;
+  updates[`rooms/${roomId}/boardSize`] = BOARD_SIZE; // 念のため
+  updates[`rooms/${roomId}/rematch`] = { p1:false, p2:false };
   updates[`rooms/${roomId}/players/p1/pos`] = 0;
   updates[`rooms/${roomId}/players/p2/pos`] = 0;
   updates[`rooms/${roomId}/players/p1/choice`] = null;
@@ -578,6 +589,7 @@ async function startGame(){
   updates[`rooms/${roomId}/players/p2/hand`] = HAND_INIT();
   await update(ref(db), updates);
 }
+
 async function goNextOrFinish(){
   const snap = await get(child(ref(db), `rooms/${roomId}`));
   if (!snap.exists()) return;
@@ -600,11 +612,11 @@ async function goNextOrFinish(){
       [`rooms/${roomId}/lastResult`]: { ...(d.lastResult||{}), final:true, winner },
       [`rooms/${roomId}/showUntilMs`]: null,
       [`rooms/${roomId}/revealRound`]: null,
-      [`rooms/${roomId}/revealUntilMs`]: null
+      [`rooms/${roomId}/revealUntilMs`]: null,
+      [`rooms/${roomId}/rematch`]: { p1:false, p2:false }
     });
-    // 最終オーバーレイ（両端末）
-    const txt = winner===null ? "🤝 引き分け！" : (winner==="p1" ? "🏆 勝利！" : "😢 敗北…");
-    showResultOverlay(txt, 2500);
+    // 終了オーバーレイ（両端末にボタン）
+    showEndOverlay();
     return;
   }
 
@@ -625,6 +637,31 @@ async function goNextOrFinish(){
   lastBeepSec = null;
   hideResultOverlay();
 }
+
+async function resetMatchFromEnded(){
+  // 両者が「もう一回」を押した → p1が完全リセット
+  const now = Date.now();
+  const updates = {};
+  updates[`rooms/${roomId}/state`] = "playing";
+  updates[`rooms/${roomId}/round`] = 1;
+  updates[`rooms/${roomId}/roundStartMs`] = now;
+  updates[`rooms/${roomId}/lastResult`] = null;
+  updates[`rooms/${roomId}/revealRound`] = null;
+  updates[`rooms/${roomId}/revealUntilMs`] = null;
+  updates[`rooms/${roomId}/showUntilMs`] = null;
+  updates[`rooms/${roomId}/boardSize`] = BOARD_SIZE;
+  updates[`rooms/${roomId}/rematch`] = { p1:false, p2:false };
+  updates[`rooms/${roomId}/players/p1/pos`] = 0;
+  updates[`rooms/${roomId}/players/p2/pos`] = 0;
+  updates[`rooms/${roomId}/players/p1/choice`] = null;
+  updates[`rooms/${roomId}/players/p2/choice`] = null;
+  updates[`rooms/${roomId}/players/p1/hand`] = HAND_INIT();
+  updates[`rooms/${roomId}/players/p2/hand`] = HAND_INIT();
+  await update(ref(db), updates);
+  hideResultOverlay();
+}
+
+/* 退出（そのまま） */
 async function leaveRoom(){
   try{
     if (!roomId){ location.reload(); return; }
@@ -635,13 +672,12 @@ async function leaveRoom(){
     if (seat === "p1"){
       await remove(ref(db), `rooms/${roomId}`);
     }else{
-      // ゲスト退出 → p2リセット、対戦中ならロビーへ戻す
       const updates = {};
       const base = `rooms/${roomId}/players/p2`;
       updates[`${base}/id`]=null; updates[`${base}/name`]=null; updates[`${base}/pos`]=0;
       updates[`${base}/choice`]=null; updates[`${base}/hand`]=HAND_INIT(); updates[`${base}/joinedAt`]=null;
 
-      if (d.state==="playing"){
+      if (d.state==="playing" || d.state==="ended"){
         updates[`rooms/${roomId}/state`]="lobby";
         updates[`rooms/${roomId}/round`]=0;
         updates[`rooms/${roomId}/roundStartMs`]=null;
@@ -649,6 +685,7 @@ async function leaveRoom(){
         updates[`rooms/${roomId}/revealRound`]=null;
         updates[`rooms/${roomId}/revealUntilMs`]=null;
         updates[`rooms/${roomId}/showUntilMs`]=null;
+        updates[`rooms/${roomId}/rematch`]={p1:false,p2:false};
       }
       await update(ref(db), updates);
     }
@@ -662,7 +699,6 @@ async function leaveRoom(){
 }
 
 /* [16] ユーティリティ */
-function HAND_INIT(){ return { G:4, C:4, P:4, WIN:1, SWAP:1, BARRIER:1 }; }
 function updateCounts(h){
   if (!h) return;
   if (cntG) cntG.textContent = `×${h.G||0}`;
@@ -675,7 +711,7 @@ function updateCounts(h){
 function isBasic(x){ return x==="G"||x==="C"||x==="P"; }
 function gain(x){ return x==="G"?3:x==="C"?4:5; }
 function toFace(x){ return x==="G"?"✊":x==="C"?"✌️":x==="P"?"🫲":x==="WIN"?"👑":x==="SWAP"?"🔁":x==="BARRIER"?"🛡️":null; }
-function clamp25(x){ return Math.max(0, Math.min(25, x)); }
+function clampToBoard(x, size){ return Math.max(0, Math.min(size, x)); }
 function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
 function hintText(code){
   switch(code){
@@ -725,7 +761,7 @@ function placeTokens(p1, p2, size){
   if (idx2>=0){ const t=document.createElement("div"); t.className="token op"; cells[idx2]?.appendChild(t); }
 }
 
-/* オーバーレイ */
+/* オーバーレイ（結果/カウント/終了） */
 function ensureOverlay(){
   if (resultOverlayEl) return resultOverlayEl;
   const el = document.createElement("div");
@@ -746,7 +782,7 @@ function ensureOverlay(){
   inner.style.fontSize = "22px";
   inner.style.fontWeight = "700";
   inner.style.textAlign = "center";
-  inner.style.minWidth = "240px";
+  inner.style.minWidth = "260px";
   inner.style.boxShadow = "0 8px 24px rgba(0,0,0,.25)";
   el.appendChild(inner);
   document.body.appendChild(el);
@@ -756,7 +792,10 @@ function ensureOverlay(){
 function showResultOverlay(text, ms){
   const el = ensureOverlay();
   const inner = el.querySelector("#overlayInner");
-  inner.textContent = text;
+  inner.innerHTML = ""; // クリア
+  const div = document.createElement("div");
+  div.textContent = text;
+  inner.appendChild(div);
   el.style.display = "flex";
   if (overlayHideTimer) clearTimeout(overlayHideTimer);
   if (typeof ms === "number"){
@@ -768,6 +807,75 @@ function hideResultOverlay(){
   resultOverlayEl.style.display = "none";
   if (overlayHideTimer){ clearTimeout(overlayHideTimer); overlayHideTimer=null; }
 }
+
+/* 終了オーバーレイ（もう一回/退室ボタン） */
+function showEndOverlay(){
+  const d = curRoom;
+  if (!d) return;
+  const el = ensureOverlay();
+  const inner = el.querySelector("#overlayInner");
+  inner.innerHTML = "";
+
+  const winner = d.lastResult?.winner ?? null;
+  const title = document.createElement("div");
+  title.style.fontSize = "24px";
+  title.style.marginBottom = "12px";
+  title.textContent = winner===null ? "🤝 引き分け！" : (winner==="p1" ? (seat==="p1"?"🏆 勝利！":"😢 敗北…") : (seat==="p2"?"🏆 勝利！":"😢 敗北…"));
+  inner.appendChild(title);
+
+  const sub = document.createElement("div");
+  sub.style.fontSize = "14px";
+  sub.style.marginBottom = "16px";
+  sub.textContent = "もう一回遊ぶ？";
+  inner.appendChild(sub);
+
+  const btnRow = document.createElement("div");
+  btnRow.style.display = "flex";
+  btnRow.style.gap = "12px";
+  btnRow.style.justifyContent = "center";
+
+  const againBtn = document.createElement("button");
+  againBtn.textContent = "もう一回";
+  againBtn.style.padding = "10px 14px";
+  againBtn.style.fontSize = "16px";
+  againBtn.style.borderRadius = "10px";
+  againBtn.style.border = "none";
+  againBtn.style.cursor = "pointer";
+
+  const leaveBtn = document.createElement("button");
+  leaveBtn.textContent = "退室";
+  leaveBtn.style.padding = "10px 14px";
+  leaveBtn.style.fontSize = "16px";
+  leaveBtn.style.borderRadius = "10px";
+  leaveBtn.style.border = "none";
+  leaveBtn.style.cursor = "pointer";
+  leaveBtn.style.background = "#eee";
+
+  btnRow.appendChild(againBtn);
+  btnRow.appendChild(leaveBtn);
+  inner.appendChild(btnRow);
+
+  const note = document.createElement("div");
+  note.style.marginTop = "10px";
+  note.style.fontSize = "12px";
+  note.textContent = (seat==="p1" ? (d.rematch?.p1 ? "あなたはリマッチ希望。相手を待っています…" : "")
+                                  : (d.rematch?.p2 ? "あなたはリマッチ希望。相手を待っています…" : ""));
+  inner.appendChild(note);
+
+  againBtn.onclick = async ()=>{
+    const key = seat==="p1" ? "p1" : "p2";
+    await update(ref(db), { [`rooms/${roomId}/rematch/${key}`]: true });
+    note.textContent = "リマッチ希望を送信しました。相手を待っています…";
+  };
+  leaveBtn.onclick = ()=>{
+    hideResultOverlay();
+    leaveRoom();
+  };
+
+  el.style.display = "flex";
+}
+
+/* タイマー/カウント/結果/終了UI の更新 */
 function updateTimeAndOverlays(){
   const d = curRoom;
   if (!d){
@@ -797,6 +905,12 @@ function updateTimeAndOverlays(){
     }
   }
 
+  // 終了時：終了オーバーレイ（ボタン）
+  if (d.state === "ended"){
+    showEndOverlay();
+    return;
+  }
+
   // カウントダウンオーバーレイ
   if (d.revealRound === round && now < (d.revealUntilMs||0)){
     const remainSec = Math.ceil(((d.revealUntilMs||0) - now)/1000);
@@ -807,11 +921,12 @@ function updateTimeAndOverlays(){
     const resultNow = d.lastResult && d.lastResult._round === round;
     if (resultNow && d.showUntilMs && now < d.showUntilMs){
       showResultOverlay(makeRoundSummary(d.lastResult), 300);
-    }else if (d.state !== "ended"){
+    }else{
       hideResultOverlay();
     }
   }
 }
+
 function makeRoundSummary(r){
   if (!r) return "—";
   if (r.swap) return "🔁 位置を交換！";
