@@ -21,9 +21,26 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .board{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:10px 0}
 .cell{background:white;border-radius:10px;padding-top:70%;position:relative;box-shadow:inset 0 0 0 2px #ffe0ef}
 .cell.goal{box-shadow:inset 0 0 0 3px #ff99c8}
-.token{position:absolute;width:60%;height:60%;top:20%;left:20%;border-radius:999px}
-.token.me{background:#ff99c8aa}
-.token.op{background:#8ecae6aa}
+/* ==== トークン（同マス時は半々の1個を出す） ==== */
+.token{
+  position:absolute;
+  top:20%; left:20%; width:60%; height:60%;
+  border-radius:999px;
+  border:2px solid #fff;                 /* 縁取りで見やすく */
+  box-shadow:0 1px 3px rgba(0,0,0,.25);  /* ちょい立体 */
+}
+.token.me{ background:#ff99c8; }         /* ピンク（不透明） */
+.token.op{ background:#8ecae6; }         /* ブルー（不透明） */
+
+/* 同じマスに2人 → 半々の“duo”トークンを1個だけ置く */
+.token.duo{
+  display:flex; overflow:hidden;
+  top:20%; left:20%; width:60%; height:60%;
+  border-radius:999px; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,.25);
+}
+.token.duo .half{ width:50%; height:100%; }
+.token.duo .half.a{ background:#ff99c8; }  /* 左半分ピンク */
+.token.duo .half.b{ background:#8ecae6; }  /* 右半分ブルー */
 
 .status{display:flex;gap:8px;margin:8px 0}
 .chip{background:white;border-radius:999px;padding:6px 10px;box-shadow:0 1px 0 rgba(0,0,0,.04)}
