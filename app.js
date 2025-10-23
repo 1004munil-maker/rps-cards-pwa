@@ -84,6 +84,15 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db  = getDatabase(app);
 
+// --- 名前未入力はボタン無効化（1文字以上で有効） ---
+btnCreate.disabled = true;
+btnJoin.disabled   = true;
+playerName.addEventListener('input', () => {
+  const ok = playerName.value.trim().length >= 1;
+  btnCreate.disabled = !ok;
+  btnJoin.disabled   = !ok;
+});
+
 /* [04] DOM取得 */
 const $ = s => document.querySelector(s);
 const playerName = $("#playerName");
@@ -142,20 +151,52 @@ makeBoard();
 /* [08] イベント紐づけ */
 btnCreate.onclick = async () => {
   sfx.click();
-  myName = (playerName.value || "Player").trim();
+  const name = (playerName.value || "").trim();
+  if (name.length < 1) {
+    alert("名前を1文字以上入力してね");
+    playerName.focus();
+    return;
+  }
+  myName = name;
   roomId = rid(6);
   seat = "p1";
   await createRoom(roomId, myName);
   enterLobby();
 };
 
+// 置き換え：参加ボタン
 btnJoin.onclick = async () => {
   sfx.click();
-  myName = (playerName.value || "Player").trim();
+  const name = (playerName.value || "").trim();
+  if (name.length < 1) {
+    alert("名前を1文字以上入力してね");
+    playerName.focus();
+    return;
+  }
+  myName = name;
+
   roomId = (joinId.value || "").trim().toUpperCase();
-  if (!roomId) return alert("部屋IDを入力してね");
-  const ok = await joinRoom(roomId, myName);
-  if (!ok) return alert("満席 or 部屋がありません");
+  if (!roomId) {
+    alert("部屋IDを入力してね");
+    joinId.focus();
+    return;
+  }
+
+  // ここが変更点：理由別にメッセージを出し分け
+  const res = await joinRoom(roomId, myName);
+  if (!res.ok) {
+    if (res.reason === "NO_ROOM") {
+      alert("部屋番号が存在しません");
+    } else if (res.reason === "FULL") {
+      alert("その部屋は満席です");
+    } else if (res.reason === "NO_NAME") {
+      alert("名前を1文字以上入力してね");
+    } else {
+      alert("参加に失敗しました。時間をおいて再度お試しください。");
+    }
+    return;
+  }
+
   seat = "p2";
   enterLobby();
 };
@@ -227,16 +268,21 @@ async function createRoom(id, name){
   });
 }
 
+// 置き換え：部屋参加（理由つきで返す）
 async function joinRoom(id, name){
+  name = (name || "").trim();
+  if (!name) return { ok:false, reason:"NO_NAME" };
+
   const snap = await get(child(ref(db), `rooms/${id}`));
-  if (!snap.exists()) return false;
+  if (!snap.exists()) return { ok:false, reason:"NO_ROOM" };
+
   const d = snap.val();
-  if (d.players?.p2?.id) return false;
+  if (d.players?.p2?.id) return { ok:false, reason:"FULL" };
 
   await update(ref(db, `rooms/${id}/players/p2`), {
     id: myId, name, pos: 0, choice: null, hand: HAND_INIT, joinedAt: serverTimestamp()
   });
-  return true;
+  return { ok:true };
 }
 
 /* [11] ロビー購読（開始ボタンのガード付き） */
