@@ -1,45 +1,22 @@
 /* =========================================================
-   RPS Cards — app.js v3.4（安定版フル / 3秒結果表示＋ランダムマッチ＋接続警告抑止）
-   - 旧実装が出す「/.info/connected=false」アラートを完全抑止（monkey patch）
-   - Firebase Realtime DB: off() を明示importし、安全にリスナー解除
-   - ランダムマッチ：例外処理強化＆接続“最大待ち”方式（アラート非依存）
-   - カウントダウンと結果オーバーレイ分離／結果は3秒固定表示
-   - 入力ロック/解除のタイミング整理（カクつき解消）
+   RPS Cards — app.js（マッチングUI強化版 / インデックス不足フォールバック）
+   - ランダムマッチ：
+     * 10秒間の「相手を探しています…」オーバーレイを表示
+     * .indexOn(claimedBy)未設定でも、開発向けに全件スキャンでフォールバック
+   - 既存のゲーム仕様は踏襲（3秒結果表示 等）
    ========================================================= */
-
-/* ===== devバナー（新JSが走っているか目視確認用） ===== */
-(() => {
-  const VER = "RPS app.js v3.4";
-  console.log("%c" + VER, "padding:4px 8px; background:#222; color:#fff; border-radius:6px;");
-  window.__RPS_BUILD__ = VER;
-})();
-
-/* ===== 旧アラート抑止（/.info/connected=false を含むものは無視） ===== */
-(() => {
-  const rawAlert = window.alert;
-  window.alert = function (msg) {
-    try {
-      const s = String(msg || "");
-      if (s.includes("/.info/connected=false")) {
-        console.warn("[suppress] legacy connected alert:", s);
-        return; // ここで完全抑止
-      }
-    } catch (_) {}
-    return rawAlert.apply(this, arguments);
-  };
-})();
 
 /* ========== Firebase import 安全化（必要関数を揃える） ========== */
 async function ensureFirebaseAPI(){
   const need = [
     "initializeApp","getDatabase","ref","onValue","set","update","get","child",
     "serverTimestamp","remove","push","onDisconnect","query","orderByChild",
-    "limitToFirst","runTransaction","equalTo","off" // ★ off を追加
+    "limitToFirst","runTransaction","equalTo"
   ];
   const ok = (api)=> api && need.every(k => typeof api[k] === "function");
   if (ok(window.FirebaseAPI)) return window.FirebaseAPI;
 
-  // 動的import（CDNのESM）
+  // 動的import（ESM）
   const appMod = await import("https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js");
   const dbMod  = await import("https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js");
   const api = {
@@ -60,7 +37,6 @@ async function ensureFirebaseAPI(){
     limitToFirst: dbMod.limitToFirst,
     runTransaction: dbMod.runTransaction,
     equalTo: dbMod.equalTo,
-    off: dbMod.off, // ★ 明示
   };
   window.FirebaseAPI = api;
   return api;
@@ -82,7 +58,7 @@ async function ensureFirebaseAPI(){
   document.addEventListener('wheel', e => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
   (async () => { try { if (screen.orientation?.lock) await screen.orientation.lock('portrait'); } catch(_) {} })();
 
-  /* [02] 効果音（SFX） */
+  /* [02] 効果音（SFX：そのまま） */
   class SFX {
     constructor() { this.ctx=null; this.enabled=true; }
     ensure(){ if(!this.ctx){ const AC=window.AudioContext||window.webkitAudioContext; if(AC) this.ctx=new AC(); } if(this.ctx&&this.ctx.state==='suspended') this.ctx.resume(); }
@@ -108,11 +84,11 @@ async function ensureFirebaseAPI(){
     window.addEventListener(ev, ()=> sfx.ensure(), { once:true, passive:true });
   });
 
-  /* [03] Firebase 初期化（自動import後に使用） */
+  /* [03] Firebase 初期化 */
   const {
     initializeApp, getDatabase, ref, onValue, set, update, get, child,
     serverTimestamp, remove, push, onDisconnect, query, orderByChild,
-    limitToFirst, runTransaction, equalTo, off
+    limitToFirst, runTransaction, equalTo
   } = await ensureFirebaseAPI();
 
   const firebaseConfig = {
@@ -155,7 +131,6 @@ async function ensureFirebaseAPI(){
   const stateMsg   = $("#stateMsg");
   const meChoiceEl = $("#meChoice");
   const opChoiceEl = $("#opChoice");
-  const resultText = $("#resultText");
   const btnPlay    = $("#btnPlay");
   const btnClear   = $("#btnClear");
   const btnExit    = $("#btnExit");
@@ -205,6 +180,35 @@ async function ensureFirebaseAPI(){
   let resultOverlayTimerId = null;
   let countdownOverlayEl = null;
 
+  // マッチング用オーバーレイ
+  let matchOverlayEl = null;
+  function ensureMatchOverlay(){
+    if (matchOverlayEl) return matchOverlayEl;
+    matchOverlayEl = document.createElement("div");
+    Object.assign(matchOverlayEl.style, {
+      position:"fixed", inset:"0", background:"rgba(0,0,0,0.45)",
+      display:"none", alignItems:"center", justifyContent:"center",
+      zIndex:"10000", backdropFilter:"blur(2px)"
+    });
+    const inner = document.createElement("div");
+    inner.id = "overlayMatchInner";
+    Object.assign(inner.style, {
+      background:"#fff", borderRadius:"16px", padding:"18px 24px",
+      fontSize:"18px", textAlign:"center", minWidth:"240px",
+      boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700",
+      transform:"scale(.94)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
+    });
+    const msg = document.createElement("div"); msg.id="overlayMatchMsg"; msg.style.marginBottom="6px";
+    const sub = document.createElement("div"); sub.id="overlayMatchSub"; sub.style.fontSize="12px"; sub.style.color="#666";
+    inner.appendChild(msg); inner.appendChild(sub);
+    matchOverlayEl.appendChild(inner);
+    document.body.appendChild(matchOverlayEl);
+    return matchOverlayEl;
+  }
+  function showMatchOverlay(msg, sub="最大10秒"){ const el=ensureMatchOverlay(); const inner=el.querySelector("#overlayMatchInner"); el.querySelector("#overlayMatchMsg").textContent=msg; el.querySelector("#overlayMatchSub").textContent=sub; el.style.display="flex"; requestAnimationFrame(()=>{ inner.style.transform="scale(1)"; inner.style.opacity="1"; }); }
+  function setMatchOverlay(msg, sub){ if (!matchOverlayEl) return; const m=matchOverlayEl.querySelector("#overlayMatchMsg"); const s=matchOverlayEl.querySelector("#overlayMatchSub"); if (msg) m.textContent=msg; if (sub!=null) s.textContent=sub; }
+  function hideMatchOverlay(){ if (!matchOverlayEl) return; const inner=matchOverlayEl.querySelector("#overlayMatchInner"); inner.style.transform="scale(.94)"; inner.style.opacity="0"; setTimeout(()=>{ matchOverlayEl.style.display="none"; }, 180); }
+
   /* [07] 初期描画（盤面） */
   makeBoard();
 
@@ -239,7 +243,7 @@ async function ensureFirebaseAPI(){
       if (res.reason === "NO_ROOM") alert("部屋番号が存在しません");
       else if (res.reason === "FULL") alert("その部屋は満席です");
       else if (res.reason === "NO_NAME") alert("名前を1文字以上入力してね");
-      else alert("参加に失敗しました。時間をおいて再試行してください。");
+      else alert("参加に失敗しました。時間をおいて再度お試しください。");
       return;
     }
     seat = "p2";
@@ -267,7 +271,7 @@ async function ensureFirebaseAPI(){
   };
   if (btnPlay) btnPlay.onclick = () => { sfx.play(); submitCard(); };
 
-  // ランダムマッチ
+  // ランダムマッチ（10秒スピナー＋インデックス不足フォールバック）
   if (btnRandom) btnRandom.onclick = async ()=>{
     try{
       sfx.click();
@@ -275,12 +279,21 @@ async function ensureFirebaseAPI(){
       if (!name){ alert("名前を入力してね"); playerName.focus(); return; }
       myName = name;
 
-      // 接続イベントを“最大10秒だけ”待つ（来なくても続行、アラート出さない）
-      await waitForConnected(db, 10000);
+      showMatchOverlay("マッチング相手を探しています…", "最大10秒");
+      await waitForConnected(db, 2000); // 接続確立待ち（黙って待つ）
 
-      const r = await startRandomMatch();
+      const r = await startRandomMatch({ timeoutMs: 10000, onStatus: (msg, sub)=> setMatchOverlay(msg, sub) });
+      hideMatchOverlay();
+
       if (!r.ok){
-        alert("マッチングに失敗しました：" + (r.reason || "unknown"));
+        // インデックス不足を明示
+        if (r.reason && String(r.reason).includes("INDEX_MISSING")) {
+          alert("マッチングに失敗しました（開発用メモ）：/mm/queue に「.indexOn: claimedBy」を追加してください。");
+        } else if (r.reason === "TIMEOUT") {
+          alert("相手が見つかりませんでした。しばらくしてからもう一度お試しください。");
+        } else {
+          alert("マッチングに失敗しました：" + (r.reason || "unknown"));
+        }
         return;
       }
 
@@ -291,6 +304,7 @@ async function ensureFirebaseAPI(){
       seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
       enterLobby();
     }catch(err){
+      hideMatchOverlay();
       console.error("randomMatch error:", err);
       alert("マッチング中にエラーが発生しました：" + (err?.message || err));
     }
@@ -377,8 +391,14 @@ async function ensureFirebaseAPI(){
     });
   }
 
-  /* === ランダムマッチング === */
-  async function startRandomMatch(){
+  /* === ランダムマッチング（強化） === */
+  function isMissingIndexError(err){
+    const s = String(err?.message || err || "");
+    return /index\s*not\s*defined|\.indexOn/i.test(s);
+  }
+
+  async function startRandomMatch({ timeoutMs = 10000, onStatus = ()=>{} } = {}){
+    onStatus("マッチング相手を探しています…", "最大10秒");
     let myTicketRef;
     try{
       myTicketRef = push(ref(db, 'mm/queue'));
@@ -397,7 +417,9 @@ async function ensureFirebaseAPI(){
 
     // 既存待機者を検索して奪取
     let pairedRoomId = null;
+    let usedFallback = false;
     try{
+      onStatus("待機中の相手を確認中…");
       const q = query(ref(db, 'mm/queue'), orderByChild('claimedBy'), equalTo(null), limitToFirst(10));
       const list = await get(q);
 
@@ -435,8 +457,52 @@ async function ensureFirebaseAPI(){
         }
       }
     }catch(err){
-      try{ await remove(myTicketRef); }catch(_){}
-      return { ok:false, reason:"PAIRING_FAILED: " + (err?.message || err) };
+      if (isMissingIndexError(err)){
+        // ★ 開発用フォールバック（インデックス無しでも動かす）
+        usedFallback = true;
+        onStatus("開発モード：インデックスなしでスキャン中…");
+        try{
+          const allSnap = await get(ref(db, 'mm/queue')); // 注意: 本番では非推奨（全件）
+          const all = allSnap.exists() ? allSnap.val() : {};
+          let targetKey = null, targetVal = null;
+          for (const [k,v] of Object.entries(all)){
+            if (!v || v.uid === myId) continue;
+            if (v.claimedBy == null){ targetKey = k; targetVal = v; break; }
+          }
+          if (targetKey){
+            const claimRef = ref(db, `mm/queue/${targetKey}/claimedBy`);
+            const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
+            if (tx.committed && tx.snapshot.val() === myId){
+              const newRoomId = rid(6);
+              await set(ref(db, `rooms/${newRoomId}`), {
+                createdAt: serverTimestamp(),
+                state: "lobby",
+                round: 0,
+                minRounds: MIN_ROUNDS,
+                boardSize: BOARD_SIZE,
+                roundStartMs: null,
+                lastResult: null,
+                revealRound: null,
+                revealUntilMs: null,
+                rematchVotes: { p1:false, p2:false },
+                players: {
+                  p1: { id: targetVal.uid, name: targetVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() },
+                  p2: { id: myId,       name: myName || "P2",       pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() }
+                }
+              });
+              await update(ref(db, `mm/queue/${targetKey}`), { status:"paired", roomId: newRoomId });
+              await update(myTicketRef,                         { status:"paired", roomId: newRoomId });
+              pairedRoomId = newRoomId;
+            }
+          }
+        }catch(e2){
+          try{ await remove(myTicketRef); }catch(_){}
+          return { ok:false, reason:"PAIRING_FAILED_INDEX_FALLBACK: " + (e2?.message || e2) };
+        }
+      } else {
+        try{ await remove(myTicketRef); }catch(_){}
+        return { ok:false, reason:"PAIRING_FAILED: " + (err?.message || err) };
+      }
     }
 
     if (pairedRoomId){
@@ -444,30 +510,24 @@ async function ensureFirebaseAPI(){
       return { ok:true, roomId: pairedRoomId };
     }
 
-    // 待ちに回る：自分のチケットに roomId が付くのを待つ（安全にタイムアウト）
+    // 待ちに回る：自分のチケットに roomId が付くのを待つ（10秒でタイムアウト）
+    onStatus("相手が見つかるのを待っています…");
     return await new Promise((resolve)=>{
-      const TIMEOUT_MS = 20000;
       const tid = setTimeout(async ()=>{
         try{ await remove(myTicketRef); }catch(_){}
-        resolve({ ok:false, reason:"TIMEOUT" });
-      }, TIMEOUT_MS);
+        resolve({ ok:false, reason: usedFallback ? "TIMEOUT+INDEX_MISSING" : "TIMEOUT" });
+      }, timeoutMs);
 
-      // onValueの返り値が void のブラウザでも確実に解除できるようにする
-      const cb = async (snap)=>{
+      const unsub = onValue(myTicketRef, async (snap)=>{
         const v = snap.val();
-        if (!v) { clearTimeout(tid); safeUnsub(); resolve({ ok:false, reason:"CANCELLED" }); return; }
+        if (!v) { clearTimeout(tid); unsub(); resolve({ ok:false, reason:"CANCELLED" }); return; }
         if (v.roomId){
-          clearTimeout(tid); safeUnsub();
+          clearTimeout(tid); unsub();
           const ridFound = v.roomId;
           try{ await remove(myTicketRef); }catch(_){}
           resolve({ ok:true, roomId: ridFound });
         }
-      };
-      const ret = onValue(myTicketRef, cb, (err)=>console.warn(err));
-      function safeUnsub(){
-        if (typeof ret === "function") { try{ ret(); }catch(_){ } }
-        else { try{ off(myTicketRef, 'value', cb); }catch(_){ } }
-      }
+      }, { onlyOnce:false });
     });
   }
 
@@ -927,6 +987,7 @@ async function ensureFirebaseAPI(){
   }
 
   /* [21] 盤面ヘルパ */
+  const boardEl = $("#board");
   function makeBoard(){
     const el = document.getElementById('board');
     if (!el) return;
@@ -957,34 +1018,112 @@ async function ensureFirebaseAPI(){
       to.className = "token op";
       cells[idx2]?.appendChild(to);
     }
-    // 同マス重なり：左右ズラし（CSSの .overlap-left/.overlap-right を使用）
+    // 同マス重なり：左右ズラし
     if (idx1>=0 && idx1===idx2 && tm && to){
       tm.classList.add("overlap-left");
       to.classList.add("overlap-right");
     }
   }
 
-  /* === 接続を onValue で“最大 timeoutMsだけ”待つ（アラートは出さない） === */
+  /* === カウントダウンオーバーレイ === */
+  function ensureResultOverlay(){
+    if (resultOverlayEl) return resultOverlayEl;
+    resultOverlayEl = document.createElement("div");
+    Object.assign(resultOverlayEl.style, {
+      position:"fixed", inset:"0", background:"rgba(0,0,0,0.5)",
+      display:"none", alignItems:"center", justifyContent:"center",
+      zIndex:"9999", backdropFilter:"blur(2px)"
+    });
+    const inner = document.createElement("div");
+    inner.id = "overlayResultInner";
+    Object.assign(inner.style, {
+      background:"#fff", borderRadius:"16px", padding:"24px 28px",
+      fontSize:"22px", textAlign:"center", minWidth:"260px",
+      boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700",
+      transform:"scale(.96)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
+    });
+    resultOverlayEl.appendChild(inner);
+    document.body.appendChild(resultOverlayEl);
+    return resultOverlayEl;
+  }
+  function showResultOverlay(text, ms=RESULT_SHOW_MS){
+    const el = ensureResultOverlay();
+    const inner = el.querySelector("#overlayResultInner");
+    inner.textContent = text;
+    el.style.display = "flex";
+    requestAnimationFrame(()=>{
+      inner.style.transform = "scale(1)";
+      inner.style.opacity = "1";
+    });
+    if (resultOverlayTimerId) clearTimeout(resultOverlayTimerId);
+    resultOverlayTimerId = setTimeout(hideResultOverlay, ms);
+  }
+  function hideResultOverlay(){
+    if (!resultOverlayEl) return;
+    const inner = resultOverlayEl.querySelector("#overlayResultInner");
+    if (inner){
+      inner.style.transform = "scale(.96)";
+      inner.style.opacity = "0";
+    }
+    setTimeout(()=>{ resultOverlayEl.style.display = "none"; }, 180);
+    if (resultOverlayTimerId) { clearTimeout(resultOverlayTimerId); resultOverlayTimerId = null; }
+  }
+
+  /* === 数字カウントダウン用 === */
+  function ensureCountdownOverlay(){
+    if (countdownOverlayEl) return countdownOverlayEl;
+    countdownOverlayEl = document.createElement("div");
+    Object.assign(countdownOverlayEl.style, {
+      position:"fixed", inset:"0", background:"rgba(0,0,0,0.45)",
+      display:"none", alignItems:"center", justifyContent:"center",
+      zIndex:"9998", backdropFilter:"blur(2px)"
+    });
+    const inner = document.createElement("div");
+    inner.id = "overlayCountdownInner";
+    Object.assign(inner.style, {
+      background:"#fff", borderRadius:"16px", padding:"18px 24px",
+      fontSize:"64px", textAlign:"center", minWidth:"160px",
+      boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"900",
+      transform:"scale(.94)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
+    });
+    countdownOverlayEl.appendChild(inner);
+    document.body.appendChild(countdownOverlayEl);
+    return countdownOverlayEl;
+  }
+  function showCountdownOverlay(n){
+    const el = ensureCountdownOverlay();
+    const inner = el.querySelector("#overlayCountdownInner");
+    inner.textContent = `${n}`;
+    if (el.style.display!=="flex"){
+      el.style.display = "flex";
+      requestAnimationFrame(()=>{
+        inner.style.transform = "scale(1)";
+        inner.style.opacity = "1";
+      });
+    }
+  }
+  function hideCountdownOverlay(){
+    if (!countdownOverlayEl) return;
+    const inner = countdownOverlayEl.querySelector("#overlayCountdownInner");
+    if (inner){
+      inner.style.transform = "scale(.94)";
+      inner.style.opacity = "0";
+    }
+    setTimeout(()=>{ countdownOverlayEl.style.display = "none"; }, 180);
+  }
+
+  /* === 接続を onValue で待つ（最大 timeoutMs） === */
   function waitForConnected(db, timeoutMs = 10000){
     return new Promise(resolve=>{
       const connectedRef = ref(db, ".info/connected");
       let settled = false;
-
-      const cb = (snap)=>{
+      const to = setTimeout(()=>{
+        if (!settled){ settled = true; unsub?.(); resolve(false); }
+      }, timeoutMs);
+      const unsub = onValue(connectedRef, snap=>{
         const v = !!snap.val();
-        if (v && !settled){
-          settled = true;
-          clearTimeout(to);
-          safeUnsub();
-          resolve(true);
-        }
-      };
-      const ret = onValue(connectedRef, cb, (err)=>console.warn("connected listen err:", err));
-      function safeUnsub(){
-        if (typeof ret === "function") { try{ ret(); }catch(_){ } }
-        else { try{ off(connectedRef, 'value', cb); }catch(_){ } }
-      }
-      const to = setTimeout(()=>{ if (!settled){ settled = true; safeUnsub(); resolve(false); } }, timeoutMs);
+        if (v && !settled){ settled = true; clearTimeout(to); unsub?.(); resolve(true); }
+      });
     });
   }
 
@@ -1054,92 +1193,7 @@ async function ensureFirebaseAPI(){
   function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
 
   // === 結果オーバーレイ（結果専用） ===
-  function ensureResultOverlay(){
-    if (resultOverlayEl) return resultOverlayEl;
-    resultOverlayEl = document.createElement("div");
-    Object.assign(resultOverlayEl.style, {
-      position:"fixed", inset:"0", background:"rgba(0,0,0,0.5)",
-      display:"none", alignItems:"center", justifyContent:"center",
-      zIndex:"9999", backdropFilter:"blur(2px)"
-    });
-    const inner = document.createElement("div");
-    inner.id = "overlayResultInner";
-    Object.assign(inner.style, {
-      background:"#fff", borderRadius:"16px", padding:"24px 28px",
-      fontSize:"22px", textAlign:"center", minWidth:"260px",
-      boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700",
-      transform:"scale(.96)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
-    });
-    resultOverlayEl.appendChild(inner);
-    document.body.appendChild(resultOverlayEl);
-    return resultOverlayEl;
-  }
-  function showResultOverlay(text, ms=RESULT_SHOW_MS){
-    const el = ensureResultOverlay();
-    const inner = el.querySelector("#overlayResultInner");
-    inner.textContent = text;
-    el.style.display = "flex";
-    requestAnimationFrame(()=>{
-      inner.style.transform = "scale(1)";
-      inner.style.opacity = "1";
-    });
-    if (resultOverlayTimerId) clearTimeout(resultOverlayTimerId);
-    resultOverlayTimerId = setTimeout(hideResultOverlay, ms);
-  }
-  function hideResultOverlay(){
-    if (!resultOverlayEl) return;
-    const inner = resultOverlayEl.querySelector("#overlayResultInner");
-    if (inner){
-      inner.style.transform = "scale(.96)";
-      inner.style.opacity = "0";
-    }
-    setTimeout(()=>{ resultOverlayEl.style.display = "none"; }, 180);
-    if (resultOverlayTimerId) { clearTimeout(resultOverlayTimerId); resultOverlayTimerId = null; }
-  }
-
-  // === カウントダウンオーバーレイ ===
-  function ensureCountdownOverlay(){
-    if (countdownOverlayEl) return countdownOverlayEl;
-    countdownOverlayEl = document.createElement("div");
-    Object.assign(countdownOverlayEl.style, {
-      position:"fixed", inset:"0", background:"rgba(0,0,0,0.45)",
-      display:"none", alignItems:"center", justifyContent:"center",
-      zIndex:"9998", backdropFilter:"blur(2px)"
-    });
-    const inner = document.createElement("div");
-    inner.id = "overlayCountdownInner";
-    Object.assign(inner.style, {
-      background:"#fff", borderRadius:"16px", padding:"18px 24px",
-      fontSize:"64px", textAlign:"center", minWidth:"160px",
-      boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"900",
-      transform:"scale(.94)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
-    });
-    countdownOverlayEl.appendChild(inner);
-    document.body.appendChild(countdownOverlayEl);
-    return countdownOverlayEl;
-  }
-  function showCountdownOverlay(n){
-    const el = ensureCountdownOverlay();
-    const inner = el.querySelector("#overlayCountdownInner");
-    inner.textContent = `${n}`;
-    if (el.style.display!=="flex"){
-      el.style.display = "flex";
-      requestAnimationFrame(()=>{
-        inner.style.transform = "scale(1)";
-        inner.style.opacity = "1";
-      });
-    }
-  }
-  function hideCountdownOverlay(){
-    if (!countdownOverlayEl) return;
-    const inner = countdownOverlayEl.querySelector("#overlayCountdownInner");
-    if (inner){
-      inner.style.transform = "scale(.94)";
-      inner.style.opacity = "0";
-    }
-    setTimeout(()=>{ countdownOverlayEl.style.display = "none"; }, 180);
-  }
-
+  let resultOverlayEl = null, resultOverlayTimerId = null;
   function makeRoundSummary(r, mySeat){
     const seatKey = mySeat || (seat==="p1"?"p1":"p2");
     if (r.swap) return "🔁 位置を交換！";
