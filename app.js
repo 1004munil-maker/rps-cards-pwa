@@ -1,8 +1,29 @@
 /* =========================================================
-   RPS Cards — app.js（マッチング安定版 / 再入OK・キャンセル可・両者準備で自動開始）
+   RPS Cards — app.js（安定版 / ランダム対戦＋精密タイマー＋再実行OK）
+   変更点サマリ
+   [00] 依存の動的importを堅牢化（RTDB off も含める）
+   [01] モバイル系の誤タップ防止＆画面縦固定
+   [02] SFX（効果音）
+   [03] Firebase初期化（CDN import → initializeApp → getDatabase）
+   [04] DOMキャッシュ
+   [05] オーバーレイ（結果・カウントダウン・マッチング）／Match管理
+   [06] 定数（ルール/時間）
+   [07] 状態（プレイヤー／ルーム／タイマー）
+   [08] 盤面生成
+   [09] イベント束ね（作成/参加/コピー/開始/退出/カード/ランダム）
+   [10] ルーム作成・参加・ロビー購読
+   [11] 描画（UIの一括更新）
+   [12] 精密10秒タイマー（秒飛びゼロ）
+   [13] カード選択～提出
+   [14] タイムアウト処理／判定ルール／SFX出力
+   [15] 結果適用→自動ラウンド遷移
+   [16] 補助（手札生成/表記/数値処理/待機）
+   [17] ポーリング（判定終了→結果→次R・再戦）
+   [18] 再戦UI
+   [19] ランダム対戦内部（奪取・待機票）
    ========================================================= */
 
-/* ========== Firebase import 安全化 ========== */
+/* [00] Firebase import（必要関数を揃える／CDNから動的読込） */
 async function ensureFirebaseAPI(){
   const need = [
     "initializeApp","getDatabase","ref","onValue","off","set","update","get","child",
@@ -32,7 +53,7 @@ async function ensureFirebaseAPI(){
     orderByChild: dbMod.orderByChild,
     limitToFirst: dbMod.limitToFirst,
     runTransaction: dbMod.runTransaction,
-    equalTo: dbMod.equalTo,
+    equalTo: dbMod.equalTo
   };
   window.FirebaseAPI = api;
   return api;
@@ -54,19 +75,22 @@ async function ensureFirebaseAPI(){
   document.addEventListener('wheel', e => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
   (async () => { try { if (screen.orientation?.lock) await screen.orientation.lock('portrait'); } catch(_) {} })();
 
-  /* [02] 効果音 */
+  /* [02] 効果音（SFX） */
   class SFX {
-    constructor() { this.ctx=null; this.enabled=true; }
+    constructor(){ this.ctx=null; this.enabled=true; }
     ensure(){ if(!this.ctx){ const AC=window.AudioContext||window.webkitAudioContext; if(AC) this.ctx=new AC(); } if(this.ctx&&this.ctx.state==='suspended') this.ctx.resume(); }
     tone({freq=440,dur=0.08,type='sine',gain=0.06,attack=0.005,release=0.04}){
       if(!this.enabled) return; this.ensure(); if(!this.ctx) return;
-      const t0=this.ctx.currentTime; const osc=this.ctx.createOscillator(); const g=this.ctx.createGain();
-      osc.type=type; osc.frequency.value=freq; g.gain.setValueAtTime(0,t0); g.gain.linearRampToValueAtTime(gain,t0+attack);
-      g.gain.exponentialRampToValueAtTime(0.0001,t0+attack+dur+release); osc.connect(g).connect(this.ctx.destination);
+      const t0=this.ctx.currentTime, osc=this.ctx.createOscillator(), g=this.ctx.createGain();
+      osc.type=type; osc.frequency.value=freq;
+      g.gain.setValueAtTime(0,t0);
+      g.gain.linearRampToValueAtTime(gain,t0+attack);
+      g.gain.exponentialRampToValueAtTime(0.0001,t0+attack+dur+release);
+      osc.connect(g).connect(this.ctx.destination);
       osc.start(t0); osc.stop(t0+attack+dur+release+0.01);
     }
     click(){ this.tone({freq:900,dur:0.03,type:'square',gain:0.04}); }
-    play(){ this.tone({freq:660,dur:0.06,type:'triangle',gain:0.05}); }  // ← 修正: dur:
+    play(){ this.tone({freq:660,dur:0.06,type:'triangle',gain:0.05}); }
     win(){ this.tone({freq:740,dur:0.09,type:'sine',gain:0.06}); setTimeout(()=>this.tone({freq:880,dur:0.09}),90); }
     lose(){ this.tone({freq:200,dur:0.12,type:'sawtooth',gain:0.05}); }
     swap(){ this.tone({freq:520,dur:0.06}); setTimeout(()=>this.tone({freq:420,dur:0.06}),70); }
@@ -107,21 +131,19 @@ async function ensureFirebaseAPI(){
   const joinId     = $("#joinId");
   const btnJoin    = $("#btnJoin");
   const btnCopy    = $("#btnCopy");
-
   const auth       = $("#auth");
   const lobby      = $("#lobby");
   const roomIdLabel= $("#roomIdLabel");
   const p1Label    = $("#p1Label");
   const p2Label    = $("#p2Label");
-  const btnStart   = $("#btnStart"); // 準備OK/解除
+  const btnStart   = $("#btnStart");
   const btnLeave   = $("#btnLeave");
-
   const game       = $("#game");
   const roundNo    = $("#roundNo");
   const minRoundsEl= $("#minRounds");
   const timerEl    = $("#timer");
   const diffEl     = $("#diff");
-  const boardEl    = $("#board");
+  const boardEl    = $("#board"); // ← 重複定義しない！
   const mePosEl    = $("#mePos");
   const opPosEl    = $("#opPos");
   const stateMsg   = $("#stateMsg");
@@ -130,83 +152,92 @@ async function ensureFirebaseAPI(){
   const btnPlay    = $("#btnPlay");
   const btnClear   = $("#btnClear");
   const btnExit    = $("#btnExit");
-
+  const btnRandom  = $("#btnRandom");
   const cardBtns   = [...document.querySelectorAll(".cardBtn")];
   const cntG       = $("#cntG"), cntC=$("#cntC"), cntP=$("#cntP"), cntWIN=$("#cntWIN"), cntSWAP=$("#cntSWAP"), cntBARRIER=$("#cntBARRIER");
 
-  /* [04.5] 名前必須ガード + ランダム */
-  const btnRandom = document.querySelector('#btnRandom');
-  const guardNameButtons = () => {
-    const ok = !!playerName?.value?.trim();
-    if (btnCreate) btnCreate.disabled = !ok;
-    if (btnJoin)   btnJoin.disabled   = !ok;
-    if (btnRandom) btnRandom.disabled = !ok || Match.active;
-  };
-  guardNameButtons();
-  playerName?.addEventListener('input', guardNameButtons);
+  /* [05] オーバーレイ（結果・カウントダウン・マッチング）＆ Match管理 */
+  let resultOverlayEl = null, resultOverlayTimerId = null;
+  function ensureResultOverlay(){
+    if (resultOverlayEl) return resultOverlayEl;
+    resultOverlayEl = document.createElement("div");
+    Object.assign(resultOverlayEl.style, {
+      position:"fixed", inset:"0", background:"rgba(0,0,0,0.5)",
+      display:"none", alignItems:"center", justifyContent:"center",
+      zIndex:"9999", backdropFilter:"blur(2px)"
+    });
+    const inner = document.createElement("div");
+    inner.id = "overlayResultInner";
+    Object.assign(inner.style, {
+      background:"#fff", borderRadius:"16px", padding:"24px 28px",
+      fontSize:"22px", textAlign:"center", minWidth:"260px",
+      boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700",
+      transform:"scale(.96)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
+    });
+    resultOverlayEl.appendChild(inner);
+    document.body.appendChild(resultOverlayEl);
+    return resultOverlayEl;
+  }
+  function showResultOverlay(text, ms){
+    const el = ensureResultOverlay();
+    const inner = el.querySelector("#overlayResultInner");
+    inner.textContent = text;
+    el.style.display = "flex";
+    requestAnimationFrame(()=>{
+      inner.style.transform = "scale(1)";
+      inner.style.opacity = "1";
+    });
+    if (resultOverlayTimerId) clearTimeout(resultOverlayTimerId);
+    resultOverlayTimerId = setTimeout(hideResultOverlay, ms);
+  }
+  function hideResultOverlay(){
+    if (!resultOverlayEl) return;
+    const inner = resultOverlayEl.querySelector("#overlayResultInner");
+    inner.style.transform = "scale(.96)";
+    inner.style.opacity = "0";
+    setTimeout(()=>{ resultOverlayEl.style.display = "none"; }, 180);
+    if (resultOverlayTimerId){ clearTimeout(resultOverlayTimerId); resultOverlayTimerId = null; }
+  }
 
-  /* [05] 定数 */
-  const BOARD_SIZE = 20;
-  const MIN_ROUNDS = 8;
-  const TURN_TIME  = 10_000;
-  const REVEAL_MS  = 3000;
-  const RESULT_SHOW_MS = 3000;
-  const COUNTDOWN_TICK_MS = 250;
-
-  const BASIC_TOTAL = 15;
-  const BASIC_MIN   = 2;
-
-  /* [06] 状態 */
-  let myId = rid(6);
-  let myName = "";
-  let roomId = "";
-  let seat = ""; // "p1" or "p2"
-  let unsubRoom = null;
-  let selectedCard = null;
-  let localTimer = null;
-  let lastBeepSec = null;
-  let roundLocked = false;
-
-  let curRoom = null;
-  let overlayShownRound = 0;
-  let revealApplyPoller = null;
-  let countdownTicker = null;
-  let resultOverlayEl = null;
-  let resultOverlayTimerId = null;
   let countdownOverlayEl = null;
-
-  /* [07] 初期描画（盤面） */
-  makeBoard();
-
-  /* ========== マッチング用オーバーレイ + Manager ========== */
-  let matchOverlayEl = null;
-  const Match = {
-    active:false, cancelled:false,
-    ticketRef:null, onTicket:null,
-    timeoutId:null, tickId:null, _onRef:null,
-    reset: async function(){
-      this.cancelled = false;
-      if (this.timeoutId){ clearTimeout(this.timeoutId); this.timeoutId=null; }
-      if (this.tickId){ clearInterval(this.tickId); this.tickId=null; }
-      if (this.ticketRef){
-        try{ await remove(this.ticketRef); }catch(_){}
-        this.ticketRef = null;
-      }
-      if (this.onTicket && this._onRef){
-        try{ off(this._onRef, 'value', this.onTicket); }catch(_){}
-      }
-      this.onTicket=null; this._onRef=null;
-      hideMatchOverlay();
-      this.active=false;
-      guardNameButtons();
-    },
-    cancel: async function(){
-      if (!this.active) return;
-      this.cancelled = true;
-      await this.reset();
+  function ensureCountdownOverlay(){
+    if (countdownOverlayEl) return countdownOverlayEl;
+    countdownOverlayEl = document.createElement("div");
+    Object.assign(countdownOverlayEl.style, {
+      position:"fixed", inset:"0", background:"rgba(0,0,0,0.45)",
+      display:"none", alignItems:"center", justifyContent:"center",
+      zIndex:"9998", backdropFilter:"blur(2px)"
+    });
+    const inner = document.createElement("div");
+    inner.id = "overlayCountdownInner";
+    Object.assign(inner.style, {
+      background:"#fff", borderRadius:"16px", padding:"18px 24px",
+      fontSize:"64px", textAlign:"center", minWidth:"160px",
+      boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"900",
+      transform:"scale(.94)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
+    });
+    countdownOverlayEl.appendChild(inner);
+    document.body.appendChild(countdownOverlayEl);
+    return countdownOverlayEl;
+  }
+  function showCountdownOverlay(n){
+    const el = ensureCountdownOverlay();
+    const inner = el.querySelector("#overlayCountdownInner");
+    inner.textContent = String(n);
+    if (el.style.display!=="flex"){
+      el.style.display = "flex";
+      requestAnimationFrame(()=>{ inner.style.transform="scale(1)"; inner.style.opacity="1"; });
     }
-  };
+  }
+  function hideCountdownOverlay(){
+    if (!countdownOverlayEl) return;
+    const inner = countdownOverlayEl.querySelector("#overlayCountdownInner");
+    inner.style.transform = "scale(.94)";
+    inner.style.opacity = "0";
+    setTimeout(()=>{ countdownOverlayEl.style.display = "none"; }, 180);
+  }
 
+  let matchOverlayEl = null;
   function ensureMatchOverlay(){
     if (matchOverlayEl) return matchOverlayEl;
     matchOverlayEl = document.createElement("div");
@@ -218,64 +249,158 @@ async function ensureFirebaseAPI(){
     const inner = document.createElement("div");
     inner.id = "overlayMatchInner";
     Object.assign(inner.style, {
-      position:"relative",
-      background:"#fff", borderRadius:"16px", padding:"18px 24px 22px",
+      background:"#fff", borderRadius:"16px", padding:"18px 24px",
       fontSize:"18px", textAlign:"center", minWidth:"260px",
       boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700",
       transform:"scale(.94)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
     });
-    const close = document.createElement("button");
-    close.textContent = "×";
-    Object.assign(close.style, {
-      position:"absolute", right:"8px", top:"6px",
-      border:"none", background:"transparent", fontSize:"20px",
-      cursor:"pointer", lineHeight:"1"
-    });
-    close.onclick = ()=> Match.cancel();
-
     const msg = document.createElement("div"); msg.id="overlayMatchMsg"; msg.style.marginBottom="6px";
     const sub = document.createElement("div"); sub.id="overlayMatchSub"; sub.style.fontSize="12px"; sub.style.color="#666";
-    inner.appendChild(close); inner.appendChild(msg); inner.appendChild(sub);
+    const row = document.createElement("div");
+    Object.assign(row.style, { marginTop:"12px", display:"flex", justifyContent:"center" });
+    const cancel = document.createElement("button");
+    cancel.textContent = "キャンセル";
+    Object.assign(cancel.style, { padding:"8px 12px", border:"none", borderRadius:"8px", fontWeight:"700", background:"#f44336", color:"#fff" });
+    cancel.onclick = async ()=>{ sfx.click(); await Match.cancel(); };
+    inner.appendChild(msg); inner.appendChild(sub); inner.appendChild(row); row.appendChild(cancel);
     matchOverlayEl.appendChild(inner);
     document.body.appendChild(matchOverlayEl);
     return matchOverlayEl;
   }
-  function showMatchOverlay(msg, sub=""){ const el=ensureMatchOverlay(); const inner=el.querySelector("#overlayMatchInner"); setMatchOverlay(msg, sub); el.style.display="flex"; requestAnimationFrame(()=>{ inner.style.transform="scale(1)"; inner.style.opacity="1"; }); }
-  function setMatchOverlay(msg, sub){ if (!matchOverlayEl) return; const m=matchOverlayEl.querySelector("#overlayMatchMsg"); const s=matchOverlayEl.querySelector("#overlayMatchSub"); if (msg!=null) m.textContent=msg; if (sub!=null) s.textContent=sub; }
-  function hideMatchOverlay(){ if (!matchOverlayEl) return; const inner=matchOverlayEl.querySelector("#overlayMatchInner"); inner.style.transform="scale(.94)"; inner.style.opacity="0"; setTimeout(()=>{ matchOverlayEl.style.display = "none"; }, 180); }
+  function showMatchOverlay(msg, sub){
+    const el = ensureMatchOverlay();
+    const inner = el.querySelector("#overlayMatchInner");
+    setMatchOverlay(msg, sub);
+    el.style.display = "flex";
+    requestAnimationFrame(()=>{ inner.style.transform="scale(1)"; inner.style.opacity="1"; });
+  }
+  function setMatchOverlay(msg, sub){
+    if (!matchOverlayEl) return;
+    const m = matchOverlayEl.querySelector("#overlayMatchMsg");
+    const s = matchOverlayEl.querySelector("#overlayMatchSub");
+    if (msg != null) m.textContent = msg;
+    if (sub != null) s.textContent = sub;
+  }
+  function hideMatchOverlay(){
+    if (!matchOverlayEl) return;
+    const inner = matchOverlayEl.querySelector("#overlayMatchInner");
+    inner.style.transform = "scale(.94)";
+    inner.style.opacity = "0";
+    setTimeout(()=>{ matchOverlayEl.style.display = "none"; }, 180);
+  }
 
-  /* [08] イベント紐づけ */
+  // Match管理（キャンセル・再実行可／残骸を必ず消す）
+  const Match = {
+    active:false, cancelled:false,
+    ticketRef:null, onTicket:null, _onRef:null,
+    timeoutId:null, tickCancel:null,
+    async reset(){
+      this.cancelled = false;
+      if (this.timeoutId){ clearTimeout(this.timeoutId); this.timeoutId = null; }
+      if (typeof this.tickCancel === "function"){ this.tickCancel(); this.tickCancel = null; }
+
+      // チケットは status を cancelled にしてから削除（他端末奪取の対象外に）
+      if (this.ticketRef){
+        try{ await update(this.ticketRef, { status:"cancelled" }); }catch(_){}
+        try{ await remove(this.ticketRef); }catch(_){}
+        this.ticketRef = null;
+      }
+      if (this.onTicket && this._onRef){
+        try{ off(this._onRef, 'value', this.onTicket); }catch(_){}
+      }
+      this.onTicket = null; this._onRef = null;
+
+      hideMatchOverlay();
+      this.active = false;
+      guardNameButtons();
+    },
+    async cancel(){
+      if (!this.active) return;
+      this.cancelled = true;
+      await this.reset();
+    }
+  };
+
+  /* [06] 定数（ルール/時間） */
+  const BOARD_SIZE = 20;
+  const MIN_ROUNDS = 8;
+  const TURN_TIME  = 10_000;
+  const REVEAL_MS  = 3000;
+  const RESULT_SHOW_MS = 3000;
+
+  const BASIC_TOTAL = 15;
+  const BASIC_MIN   = 2;
+
+  /* [07] 状態 */
+  let myId = rid(6);
+  let myName = "";
+  let roomId = "";
+  let seat = ""; // "p1" or "p2"
+
+  // onValue購読解除用（RTDBは off を使う）
+  let roomRefObj = null;
+  let roomListener = null;
+
+  let selectedCard = null;
+  let roundLocked = false;
+  let lastBeepSec = null;
+
+  let curRoom = null;
+  let overlayShownRound = 0;
+  let revealApplyPoller = null;
+  let countdownTicker = null;
+
+  // タイマー停止ハンドラ（精密タイマーは関数を返す）
+  let localTimer = null;
+
+  /* [08] 盤面生成 */
+  function makeBoard(){
+    const el = document.getElementById('board');
+    if (!el) return;
+    el.innerHTML = "";
+    for(let i=1;i<=BOARD_SIZE;i++){
+      const cell = document.createElement("div");
+      cell.className = "cell"+(i===BOARD_SIZE?" goal":"");
+      el.appendChild(cell);
+    }
+  }
+  makeBoard();
+
+  /* [09] イベント */
+  function guardNameButtons(){
+    const ok = !!playerName?.value?.trim();
+    const busy = Match.active === true;
+    if (btnCreate) btnCreate.disabled = !ok || busy;
+    if (btnJoin)   btnJoin.disabled   = !ok || busy;
+    if (btnRandom) btnRandom.disabled = !ok || busy;
+  }
+  guardNameButtons();
+  playerName?.addEventListener('input', guardNameButtons);
+
   if (btnCreate) btnCreate.onclick = async () => {
     sfx.click();
     const name = (playerName.value || "").trim();
-    if (!name) { alert("名前を1文字以上入力してね"); playerName.focus(); return; }
+    if (!name){ alert("名前を1文字以上入力してね"); playerName.focus(); return; }
     myName = name;
     roomId = rid(6);
     seat = "p1";
-    try {
-      await createRoom(roomId, myName);
-      enterLobby();
-    } catch (e) {
-      console.error("createRoom failed:", e);
-      alert("部屋作成に失敗しました：" + (e?.message || e));
-    }
+    try{ await createRoom(roomId, myName); enterLobby(); }
+    catch(e){ console.error("createRoom failed:", e); alert("部屋作成に失敗しました：" + (e?.message || e)); }
   };
 
   if (btnJoin) btnJoin.onclick = async () => {
     sfx.click();
     const name = (playerName.value || "").trim();
-    if (!name) { alert("名前を1文字以上入力してね"); playerName.focus(); return; }
+    if (!name){ alert("名前を1文字以上入力してね"); playerName.focus(); return; }
     myName = name;
-
     roomId = (joinId.value || "").trim().toUpperCase();
-    if (!roomId) { alert("部屋IDを入力してね"); joinId.focus(); return; }
-
+    if (!roomId){ alert("部屋IDを入力してね"); joinId.focus(); return; }
     const res = await joinRoom(roomId, myName);
-    if (!res.ok) {
+    if (!res.ok){
       if (res.reason === "NO_ROOM") alert("部屋番号が存在しません");
       else if (res.reason === "FULL") alert("その部屋は満席です");
       else if (res.reason === "NO_NAME") alert("名前を1文字以上入力してね");
-      else alert("参加に失敗しました。時間をおいて再度お試しください。");
+      else alert("参加に失敗しました。時間をおいて再試行してください。");
       return;
     }
     seat = "p2";
@@ -289,15 +414,7 @@ async function ensureFirebaseAPI(){
     sfx.click();
   };
 
-  // 準備OK/解除（ロビー）
-  if (btnStart) btnStart.onclick = async () => {
-    sfx.click();
-    if (!roomId) return;
-    const path = `rooms/${roomId}/players/${seat}/ready`;
-    const cur = (await get(ref(db, path))).val();
-    await update(ref(db), { [path]: !cur });
-  };
-
+  if (btnStart) btnStart.onclick = async () => { await maybeAdThenStart(); };
   if (btnLeave) btnLeave.onclick = () => { sfx.click(); leaveRoom(); };
   if (btnExit)  btnExit.onclick  = () => { sfx.click(); leaveRoom(); };
 
@@ -311,7 +428,7 @@ async function ensureFirebaseAPI(){
   };
   if (btnPlay) btnPlay.onclick = () => { sfx.play(); submitCard(); };
 
-  // ===== ランダム対戦（再入OK + キャンセル可） =====
+  // ===== ランダム対戦（UIは常に「待機中… 残りXX秒」） =====
   if (btnRandom) btnRandom.onclick = async ()=>{
     try{
       sfx.click();
@@ -323,31 +440,39 @@ async function ensureFirebaseAPI(){
       Match.active = true;
       guardNameButtons();
 
-      showMatchOverlay("相手を探しています…", "既存待機者を最大10秒検索");
+      const TOTAL_MS = 40000;
+      const endAt = Date.now() + TOTAL_MS;
+
+      showMatchOverlay("待機中…", "残り 40 秒");
+      Match.tickCancel = preciseSecCountdown(endAt, (sec)=>{
+        setMatchOverlay("待機中…", `残り ${sec} 秒`);
+      });
+
       await waitForConnected(db, 2000);
-
-      const claimRes = await pollAndClaimExisting({ seconds:10 });
       if (Match.cancelled) return;
-      if (claimRes.ok){
-        await Match.reset();
-        roomId = claimRes.roomId;
-        const snap = await get(ref(db, `rooms/${roomId}`));
-        if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
-        const d = snap.val();
-        seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
-        enterLobby();
-        return;
+
+      // ① 最初の10秒だけ既存待機者を毎秒奪取（UIは変えない）
+      const claimUntil = Date.now() + 10000;
+      while(!Match.cancelled && Date.now() < claimUntil){
+        const r = await tryClaimOne();
+        if (r.ok){
+          await Match.reset();
+          roomId = r.roomId;
+          const snap = await get(ref(db, `rooms/${roomId}`));
+          if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
+          const d = snap.val();
+          seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
+          enterLobby();
+          return;
+        }
+        await sleep(1000);
       }
-
-      setMatchOverlay("待機列に入りました…", "誰かが来るのを最大30秒待ちます（×でキャンセル）");
-      const waitRes = await enqueueAndWait({ seconds:30 });
       if (Match.cancelled) return;
+
+      // ② 残り時間で自分の待機票を作成して待機（UIはそのまま）
+      const waitRes = await enqueueAndWait({ deadlineAt: endAt });
       await Match.reset();
-
-      if (!waitRes.ok){
-        alert("いまは相手がいませんでした。また後でお試しください。");
-        return;
-      }
+      if (!waitRes.ok){ alert("いまは相手がいませんでした。また後でお試しください。"); return; }
 
       roomId = waitRes.roomId;
       const snap = await get(ref(db, `rooms/${roomId}`));
@@ -355,7 +480,6 @@ async function ensureFirebaseAPI(){
       const d = snap.val();
       seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
       enterLobby();
-
     }catch(err){
       await Match.reset();
       console.error("randomMatch error:", err);
@@ -363,30 +487,7 @@ async function ensureFirebaseAPI(){
     }
   };
 
-  /* [09] 対戦前の広告（ネイティブ時のみ） */
-  async function maybeAdThenStart(){
-    const showAd = Math.random() < 0.5;
-    const isNative = !!window.Capacitor?.isNativePlatform;
-    const AdMob = window.Capacitor?.Plugins?.AdMob;
-    if (isNative && showAd && AdMob){
-      try {
-        await AdMob.initialize({ requestTrackingAuthorization: true });
-        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-        const adId = isIOS
-          ? "ca-app-pub-3940256099942544/6978759866"
-          : "ca-app-pub-3940256099942544/5354046379";
-        await AdMob.prepareRewardedInterstitial({ adId });
-        await AdMob.showRewardedInterstitial();
-      } catch (e) {
-        console.warn("Ad error, start anyway:", e);
-      }
-      await startGame();
-      return;
-    }
-    await startGame();
-  }
-
-  /* [10] ルーム作成/参加 */
+  /* [10] ルーム作成/参加/ロビー購読 */
   async function createRoom(id, name){
     await set(ref(db, `rooms/${id}`), {
       createdAt: serverTimestamp(),
@@ -400,8 +501,8 @@ async function ensureFirebaseAPI(){
       revealUntilMs: null,
       rematchVotes: { p1:false, p2:false },
       players: {
-        p1: { id: myId, name, pos: 0, choice: null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false },
-        p2: { id: null, name: null, pos: 0, choice: null, hand: randomHand(), joinedAt: null,           ready:false }
+        p1: { id: myId, name, pos: 0, choice: null, hand: randomHand(), joinedAt: serverTimestamp() },
+        p2: { id: null, name: null, pos: 0, choice: null, hand: randomHand(), joinedAt: null }
       }
     });
   }
@@ -409,285 +510,39 @@ async function ensureFirebaseAPI(){
   async function joinRoom(id, name){
     name = (name || "").trim();
     if (!name) return { ok:false, reason:"NO_NAME" };
-
     const roomRef = ref(db, `rooms/${id}`);
     const snap = await get(roomRef);
     if (!snap.exists()) return { ok:false, reason:"NO_ROOM" };
-
     const d = snap.val();
     if (d.players?.p2?.id) return { ok:false, reason:"FULL" };
 
     await update(ref(db, `rooms/${id}/players/p2`), {
-      id: myId, name, pos: 0, choice: null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false
+      id: myId, name, pos: 0, choice: null, hand: randomHand(), joinedAt: serverTimestamp()
     });
-
     const check = await get(ref(db, `rooms/${id}/players/p2/id`));
     if (!check.exists()) return { ok:false, reason:"WRITE_FAIL" };
-
     return { ok:true };
   }
 
-  /* [11] ロビー購読 */
   function enterLobby(){
     auth?.classList.add("hidden");
     lobby?.classList.remove("hidden");
     if (roomIdLabel) roomIdLabel.textContent = roomId;
 
-    const roomRef = ref(db, `rooms/${roomId}`);
-    if (unsubRoom) unsubRoom();
-    unsubRoom = onValue(roomRef, async (snap)=>{
+    // 既存購読を解除
+    if (roomRefObj && roomListener){ try{ off(roomRefObj, 'value', roomListener); }catch(_){ } }
+    roomRefObj = ref(db, `rooms/${roomId}`);
+    roomListener = (snap)=>{
       if (!snap.exists()) return;
       const d = snap.val();
       curRoom = d;
       renderGame(d);
       ensurePollers();
-
-      // 両者準備OKなら p1 が自動開始
-      if (seat === "p1" && d.state==="lobby"){
-        const r1 = !!d.players?.p1?.ready;
-        const r2 = !!d.players?.p2?.ready;
-        const haveBoth = !!d.players?.p1?.id && !!d.players?.p2?.id;
-        if (haveBoth && r1 && r2){
-          await startGame();
-        }
-      }
-    });
+    };
+    onValue(roomRefObj, roomListener);
   }
 
-  /* ========== ランダムマッチング内部 ========== */
-  function isMissingIndexError(err){
-    const s = String(err?.message || err || "");
-    return /index\s*not\s*defined|\.indexOn/i.test(s);
-  }
-
-  async function pollAndClaimExisting({ seconds = 10 } = {}){
-    const until = Date.now() + seconds*1000;
-    while(Date.now() < until){
-      if (Match.cancelled) return { ok:false, reason:"CANCELLED" };
-      setMatchOverlay("相手を探しています…", `残り ${Math.ceil((until-Date.now())/1000)} 秒`);
-      const r = await tryClaimOne();
-      if (r.ok) return r;
-      await sleep(1000);
-    }
-    return { ok:false, reason:"NO_EXISTING" };
-  }
-
-  async function enqueueAndWait({ seconds = 30 } = {}){
-    let myTicketRef = null;
-    try{
-      myTicketRef = push(ref(db, 'mm/queue'));
-      await set(myTicketRef, {
-        uid: myId,
-        name: myName || "GUEST",
-        ts: serverTimestamp(),
-        claimedBy: null,
-        roomId: null,
-        status: "waiting"
-      });
-      try{ onDisconnect(myTicketRef).remove(); }catch(_){}
-    }catch(err){
-      return { ok:false, reason:"QUEUE_WRITE_DENIED: " + (err?.message || err) };
-    }
-    Match.ticketRef = myTicketRef;
-
-    return await new Promise((resolve)=>{
-      const deadline = Date.now() + seconds*1000;
-      Match.tickId = setInterval(()=>{
-        setMatchOverlay("待機中…", `残り ${Math.max(0,Math.ceil((deadline-Date.now())/1000))} 秒（×でキャンセル）`);
-      }, 250);
-
-      Match.timeoutId = setTimeout(async ()=>{
-        if (Match.tickId){ clearInterval(Match.tickId); Match.tickId=null; }
-        if (Match.onTicket && Match._onRef){ try{ off(Match._onRef, 'value', Match.onTicket); }catch(_){} }
-        try{ await remove(myTicketRef); }catch(_){}
-        resolve({ ok:false, reason:"TIMEOUT" });
-      }, seconds*1000);
-
-      const onTicket = async (snap)=>{
-        const v = snap.val();
-        if (!v) {
-          clearTimeout(Match.timeoutId); Match.timeoutId=null;
-          if (Match.tickId){ clearInterval(Match.tickId); Match.tickId=null; }
-          off(myTicketRef, 'value', onTicket);
-          resolve({ ok:false, reason:"CANCELLED" });
-          return;
-        }
-        if (v.roomId){
-          clearTimeout(Match.timeoutId); Match.timeoutId=null;
-          if (Match.tickId){ clearInterval(Match.tickId); Match.tickId=null; }
-          off(myTicketRef, 'value', onTicket);
-          try{ await remove(myTicketRef); }catch(_){}
-          resolve({ ok:true, roomId: v.roomId });
-        }
-      };
-      Match.onTicket = onTicket;
-      Match._onRef = myTicketRef;
-      onValue(myTicketRef, onTicket);
-    });
-  }
-
-  async function tryClaimOne(){
-    try{
-      const q = query(ref(db, 'mm/queue'), orderByChild('claimedBy'), equalTo(null), limitToFirst(25));
-      const list = await get(q);
-
-      let candKey = null; let candVal = null;
-      const arr = [];
-      list.forEach(snap=>{
-        const v = snap.val(); const k = snap.key;
-        if (!v || v.uid === myId) return;
-        arr.push({ k, v });
-      });
-      arr.sort((a,b)=> (a.v.ts||0) - (b.v.ts||0));
-      if (arr.length){ candKey = arr[0].k; candVal = arr[0].v; }
-      if (!candKey) return { ok:false, reason:"EMPTY" };
-
-      const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
-      const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
-      if (!(tx.committed && tx.snapshot.val() === myId)) return { ok:false, reason:"LOST_RACE" };
-
-      const newRoomId = rid(6);
-      await set(ref(db, `rooms/${newRoomId}`), {
-        createdAt: serverTimestamp(),
-        state: "lobby",
-        round: 0,
-        minRounds: MIN_ROUNDS,
-        boardSize: BOARD_SIZE,
-        roundStartMs: null,
-        lastResult: null,
-        revealRound: null,
-        revealUntilMs: null,
-        rematchVotes: { p1:false, p2:false },
-        players: {
-          p1: { id: candVal.uid, name: candVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false },
-          p2: { id: myId,       name: myName    || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false }
-        }
-      });
-      await update(ref(db, `mm/queue/${candKey}`), { status:"paired", roomId: newRoomId });
-
-      return { ok:true, roomId: newRoomId };
-
-    }catch(err){
-      if (isMissingIndexError(err)){
-        try{
-          const allSnap = await get(ref(db, 'mm/queue'));
-          const all = allSnap.exists() ? allSnap.val() : {};
-          const arr = Object.entries(all)
-            .filter(([k,v])=> v && v.uid !== myId && v.claimedBy == null)
-            .sort((a,b)=> ((a[1].ts||0) - (b[1].ts||0)));
-          if (!arr.length) return { ok:false, reason:"EMPTY" };
-
-          const [candKey, candVal] = arr[0];
-          const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
-          const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
-          if (!(tx.committed && tx.snapshot.val() === myId)) return { ok:false, reason:"LOST_RACE" };
-
-          const newRoomId = rid(6);
-          await set(ref(db, `rooms/${newRoomId}`), {
-            createdAt: serverTimestamp(),
-            state: "lobby",
-            round: 0,
-            minRounds: MIN_ROUNDS,
-            boardSize: BOARD_SIZE,
-            roundStartMs: null,
-            lastResult: null,
-            revealRound: null,
-            revealUntilMs: null,
-            rematchVotes: { p1:false, p2:false },
-            players: {
-              p1: { id: candVal.uid, name: candVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false },
-              p2: { id: myId,       name: myName    || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false }
-            }
-          });
-          await update(ref(db, `mm/queue/${candKey}`), { status:"paired", roomId: newRoomId });
-          return { ok:true, roomId: newRoomId };
-        }catch(e2){
-          return { ok:false, reason:"INDEX_FALLBACK_FAILED: " + (e2?.message || e2) };
-        }
-      }
-      return { ok:false, reason:"QUERY_ERROR: " + (err?.message || err) };
-    }
-  }
-
-  /* [12] ゲーム開始（両者準備OKでp1が呼ぶ） */
-  async function startGame(){
-    const snap = await get(ref(db, `rooms/${roomId}`));
-    if (!snap.exists()) { alert("部屋が見つかりません"); return; }
-    const d = snap.val();
-
-    const hasP1 = !!d?.players?.p1?.id;
-    const hasP2 = !!d?.players?.p2?.id;
-    if (!(hasP1 && hasP2)) return;
-    if (d.state === "playing") return;
-
-    await update(ref(db, `rooms/${roomId}`), {
-      state: "playing",
-      round: 1,
-      roundStartMs: Date.now(),
-      lastResult: null,
-      revealRound: null,
-      revealUntilMs: null,
-      rematchVotes: { p1:false, p2:false },
-      "players/p1/pos": 0,
-      "players/p2/pos": 0,
-      "players/p1/choice": null,
-      "players/p2/choice": null,
-      "players/p1/hand": randomHand(),
-      "players/p2/hand": randomHand(),
-      "players/p1/ready": false,
-      "players/p2/ready": false
-    });
-  }
-
-  /* [13] 退出 */
-  async function leaveRoom(){
-    try {
-      if (btnLeave) btnLeave.disabled = true;
-      if (btnExit)  btnExit.disabled  = true;
-
-      if (!roomId) { location.reload(); return; }
-
-      const snap = await get(ref(db, `rooms/${roomId}`));
-      if (!snap.exists()) {
-        if (unsubRoom) unsubRoom();
-        location.reload();
-        return;
-      }
-      const d = snap.val();
-
-      if (seat === "p1") {
-        await remove(ref(db, `rooms/${roomId}`));
-      } else {
-        const base = `rooms/${roomId}/players/p2`;
-        const updates = {};
-        updates[`${base}/id`]       = null;
-        updates[`${base}/name`]     = null;
-        updates[`${base}/pos`]      = 0;
-        updates[`${base}/choice`]   = null;
-        updates[`${base}/hand`]     = randomHand();
-        updates[`${base}/joinedAt`] = null;
-        updates[`${base}/ready`]    = false;
-
-        if (d.state === "playing") {
-          updates[`rooms/${roomId}/state`]         = "lobby";
-          updates[`rooms/${roomId}/round`]         = 0;
-          updates[`rooms/${roomId}/roundStartMs`]  = null;
-          updates[`rooms/${roomId}/lastResult`]    = null;
-          updates[`rooms/${roomId}/revealRound`]   = null;
-          updates[`rooms/${roomId}/revealUntilMs`] = null;
-        }
-        await update(ref(db), updates);
-      }
-    } catch (err) {
-      console.error("leaveRoom error:", err);
-      alert("退出に失敗しました。ネットワークを確認してもう一度お試しください。");
-    } finally {
-      if (unsubRoom) unsubRoom();
-      setTimeout(()=>location.reload(), 150);
-    }
-  }
-
-  /* [14] レンダリング（演出・入力制御） */
+  /* [11] レンダリング */
   function renderGame(d){
     if (d.state === "lobby"){
       auth?.classList.add("hidden");
@@ -698,8 +553,8 @@ async function ensureFirebaseAPI(){
       game?.classList.remove("hidden");
     }
 
-    roundNo && (roundNo.textContent = d.round ?? 0);
-    minRoundsEl && (minRoundsEl.textContent = d.minRounds ?? MIN_ROUNDS);
+    if (roundNo) roundNo.textContent = String(d.round ?? 0);
+    if (minRoundsEl) minRoundsEl.textContent = String(d.minRounds ?? MIN_ROUNDS);
 
     const meSeat = seat;
     const opSeat = seat==="p1" ? "p2" : "p1";
@@ -712,32 +567,22 @@ async function ensureFirebaseAPI(){
     const endedThisRound = !!(d.lastResult && d.lastResult._round === d.round);
     const revealing      = (d.revealRound === d.round);
 
-    p1Label && (p1Label.textContent = d.players.p1?.name || "-");
-    p2Label && (p2Label.textContent = d.players.p2?.name || "-");
-
-    if (btnStart){
-      if (d.state==="lobby"){
-        const myReady = !!d.players?.[meSeat]?.ready;
-        btnStart.textContent = myReady ? "準備解除" : "準備OK";
-        btnStart.disabled = false;
-      } else {
-        btnStart.textContent = "対戦中";
-        btnStart.disabled = true;
-      }
-    }
+    if (p1Label) p1Label.textContent = d.players.p1?.name || "-";
+    if (p2Label) p2Label.textContent = d.players.p2?.name || "-";
+    if (btnStart) btnStart.disabled = !(seat==="p1" && d.players.p1?.id && d.players.p2?.id) || d.state!=="lobby";
 
     updateCounts(me.hand);
     placeTokens(d.players.p1.pos, d.players.p2.pos, d.boardSize);
-    mePosEl && (mePosEl.textContent = seat==="p1" ? d.players.p1.pos : d.players.p2.pos);
-    opPosEl && (opPosEl.textContent = seat==="p1" ? d.players.p2.pos : d.players.p1.pos);
+    if (mePosEl) mePosEl.textContent = String(seat==="p1" ? d.players.p1.pos : d.players.p2.pos);
+    if (opPosEl) opPosEl.textContent = String(seat==="p1" ? d.players.p2.pos : d.players.p1.pos);
 
-    diffEl && (diffEl.textContent = Math.abs(
+    if (diffEl) diffEl.textContent = String(Math.abs(
       (seat==="p1"?d.players.p1.pos:d.players.p2.pos) -
       (seat==="p1"?d.players.p2.pos:d.players.p1.pos)
     ));
 
-    meChoiceEl && (meChoiceEl.textContent = toFace(me.choice) || "？");
-    opChoiceEl && (opChoiceEl.textContent = opSubmitted ? "⏳" : "？");
+    if (meChoiceEl) meChoiceEl.textContent = toFace(me.choice) || "？";
+    if (opChoiceEl) opChoiceEl.textContent = opSubmitted ? "⏳" : "？";
 
     const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
     const swapBtn = document.querySelector('.cardBtn[data-card="SWAP"]');
@@ -759,10 +604,6 @@ async function ensureFirebaseAPI(){
       if (d.state === "ended"){
         const w = d.lastResult?.winner;
         stateMsg.textContent = w===null ? "🤝 引き分け。もう一回する？" : ( (w===meSeat) ? "🏆 勝利！" : "😢 敗北…" );
-      } else if (d.state === "lobby"){
-        const r1 = d.players?.p1?.ready ? "✅" : "—";
-        const r2 = d.players?.p2?.ready ? "✅" : "—";
-        stateMsg.textContent = `準備：P1 ${r1} / P2 ${r2}`;
       } else if (revealing){
         const remain = Math.max(0, Math.ceil((d.revealUntilMs - Date.now())/1000));
         stateMsg.textContent = `判定まで… ${remain}s`;
@@ -794,52 +635,47 @@ async function ensureFirebaseAPI(){
     if (!endedThisRound && !revealing && overlayShownRound !== d.round){ hideResultOverlay(); }
   }
 
-  /* [15] 10秒タイマー */
+  /* [12] 精密10秒タイマー（秒飛び防止） */
   function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
-    if (localTimer) clearInterval(localTimer);
+    if (typeof localTimer === "function"){ localTimer(); } // 以前のタイマー停止
     lastBeepSec = null;
 
-    if (roomData?.state !== "playing") { timerEl && (timerEl.textContent = "-"); return; }
+    if (roomData?.state !== "playing"){ if (timerEl) timerEl.textContent = "-"; return; }
 
     const ended = !!(roomData?.lastResult && roomData.lastResult._round === roomData.round);
     const revealing = (roomData?.revealRound === roomData?.round);
-    if (roomData?.state==="ended" || ended || revealing || (myChoice && opChoice)){ timerEl && (timerEl.textContent = "OK"); return; }
+    if (roomData?.state==="ended" || ended || revealing || (myChoice && opChoice)){
+      if (timerEl) timerEl.textContent = "OK";
+      return;
+    }
 
     const deadline = (roundStartMs || Date.now()) + TURN_TIME;
-
-    const tick = async ()=>{
-      const remain = Math.max(0, deadline - Date.now());
-      const sec = Math.ceil(remain/1000);
-      timerEl && (timerEl.textContent = sec);
-
-      if (sec <= 3 && sec !== lastBeepSec && remain > 0) { sfx.tick(); lastBeepSec = sec; }
-
-      if (remain <= 0){
-        clearInterval(localTimer);
+    localTimer = preciseSecCountdown(
+      deadline,
+      (sec)=>{
+        if (timerEl) timerEl.textContent = String(sec);
+        if (sec <= 3 && sec !== lastBeepSec && sec > 0){ sfx.tick(); lastBeepSec = sec; }
+      },
+      async ()=>{
         sfx.timesup();
         if (seat === "p1"){
           const dNowSnap = await get(ref(db, `rooms/${roomId}`)).catch(()=>null);
-          if (dNowSnap?.exists()){
-            await settleTimeout(dNowSnap.val());
-          }
+          if (dNowSnap?.exists()){ await settleTimeout(dNowSnap.val()); }
         }
-        timerEl && (timerEl.textContent = "OK");
+        if (timerEl) timerEl.textContent = "OK";
       }
-    };
-    tick();
-    localTimer = setInterval(tick, 200);
+    );
   }
 
-  /* [16] カード選択系 */
+  /* [13] カード選択～提出 */
   function pickCard(code){
     if (roundLocked) return;
     const btn = document.querySelector(`.cardBtn[data-card="${code}"]`);
     if (btn?.disabled) return;
-
     selectedCard = code;
     cardBtns.forEach(b => b.classList.toggle("selected", b===btn));
     if (btnPlay) btnPlay.disabled = false;
-    stateMsg && (stateMsg.textContent = displayHint(code));
+    if (stateMsg) stateMsg.textContent = displayHint(code);
   }
   function displayHint(code){
     switch(code){
@@ -853,7 +689,6 @@ async function ensureFirebaseAPI(){
     }
   }
 
-  /* [17] 提出→演出起動 */
   async function submitCard(){
     if (!selectedCard) return;
 
@@ -892,7 +727,7 @@ async function ensureFirebaseAPI(){
     const snap = await get(ref(db, `rooms/${roomId}`));
     if (!snap.exists()) return;
     const d = snap.val();
-    const p1 = d.players.p1; const p2 = d.players.p2;
+    const p1 = d.players.p1, p2 = d.players.p2;
     const both = !!p1.choice && !!p2.choice;
 
     if (both && seat === "p1" && d.revealRound !== d.round){
@@ -903,12 +738,12 @@ async function ensureFirebaseAPI(){
     }
   }
 
-  /* [18] タイムアウト処理 */
+  /* [14] タイムアウト／判定／SFX */
   async function settleTimeout(roomData){
     const d = roomData ?? (await get(ref(db, `rooms/${roomId}`))).val();
-    const p1 = d.players.p1; const p2 = d.players.p2;
-    const a = p1.choice; const b = p2.choice;
-    if (a && b) return;
+    const p1 = d.players.p1, p2 = d.players.p2;
+    const a = p1.choice, b = p2.choice;
+    if (a && b) return; // 両者提出済 → 演出ルート
 
     let result;
     if (!a && b){ result = winByDefault("p2", b, d); }
@@ -930,7 +765,7 @@ async function ensureFirebaseAPI(){
       return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?gain:0, p2: winnerSeat==="p2"?gain:0}, note:"時間切れ" };
     }
     if (card==="WIN"){
-      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?4:0, p2: winnerSeat==="p2"?4:0}, note:"時間切れ(必勝)" }; // ← 修正: "p1"?
+      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?4:0, p2: winnerSeat==="p2"?4:0}, note:"時間切れ(必勝)" };
     }
     if (card==="SWAP"){
       if (diff<8) return { type:"swap", winner:winnerSeat, swap:true, note:"時間切れ(位置交換)" };
@@ -942,27 +777,19 @@ async function ensureFirebaseAPI(){
     return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0} };
   }
 
-  /* [19] ルール＆SFX */
   function judgeRound(p1, p2){
-    const a = p1.choice; const b = p2.choice;
-
+    const a = p1.choice, b = p2.choice;
     if (a==="WIN" && b==="WIN") return { type:"win", winner:null, delta:{p1:0,p2:0}, note:"必勝同士" };
-
     if (a==="BARRIER" && (b==="WIN"||b==="SWAP")) return { type:"barrier", winner:"p1", delta:{p1:0,p2:0}, barrier:true };
     if (b==="BARRIER" && (a==="WIN"||a==="SWAP")) return { type:"barrier", winner:"p2", delta:{p1:0,p2:0}, barrier:true };
-
     if (a==="BARRIER" && (b==="G"||b==="C"||b==="P")) return { type:"barrier-penalty", winner:"p2", delta:{p1:-1,p2:0} };
     if (b==="BARRIER" && (a==="G"||a==="C"||a==="P")) return { type:"barrier-penalty", winner:"p1", delta:{p1:0,p2:-1} };
-
     if (a==="BARRIER" && b==="BARRIER") return { type:"tie", winner:null, delta:{p1:0,p2:0} };
-
     if (a==="WIN" && b!=="BARRIER") return { type:"win", winner:"p1", delta:{p1:4,p2:0} };
     if (b==="WIN" && a!=="BARRIER") return { type:"win", winner:"p2", delta:{p1:0,p2:4} };
-
     if (a==="SWAP" && b!=="BARRIER"){ return { type:"swap", winner:"p1", swap:true }; }
     if (b==="SWAP" && a!=="BARRIER"){ return { type:"swap", winner:"p2", swap:true }; }
     if (a==="SWAP" && b==="SWAP") return { type:"tie", winner:null, delta:{p1:0,p2:0}, note:"ダブルSWAPは相殺" };
-
     if (isBasic(a) && isBasic(b)){
       if (a===b) return { type:"tie", winner:null, delta:{p1:0,p2:0} };
       const aWin = (a==="G"&&b==="C")||(a==="C"&&b==="P")||(a==="P"&&b==="G");
@@ -987,7 +814,7 @@ async function ensureFirebaseAPI(){
     }
   }
 
-  /* [20] 結果適用→自動次R（p1） */
+  /* [15] 結果適用→自動次R */
   async function applyResult(d, r){
     if (d.lastResult && d.lastResult._round === d.round) return;
 
@@ -1049,149 +876,10 @@ async function ensureFirebaseAPI(){
     }, waitMs);
   }
 
-  /* [21] 盤面 */
-  function makeBoard(){
-    const el = document.getElementById('board');
-    if (!el) return;
-    el.innerHTML = "";
-    for(let i=1;i<=BOARD_SIZE;i++){
-      const cell = document.createElement("div");
-      cell.className = "cell"+(i===BOARD_SIZE?" goal":"");
-      el.appendChild(cell);
-    }
-  }
-  function placeTokens(p1, p2, size){
-    const cells = [...boardEl.children];
-    cells.forEach(c=>{
-      c.querySelector(".token.me")?.remove();
-      c.querySelector(".token.op")?.remove();
-    });
-    const idx1 = Math.min(size, Math.max(0,p1)) - 1;
-    const idx2 = Math.min(size, Math.max(0,p2)) - 1;
-
-    let tm=null; let to=null;
-    if (idx1>=0){
-      tm = document.createElement("div");
-      tm.className = "token me";
-      cells[idx1]?.appendChild(tm);
-    }
-    if (idx2>=0){
-      to = document.createElement("div");
-      to.className = "token op";
-      cells[idx2]?.appendChild(to);
-    }
-    if (idx1>=0 && idx1===idx2 && tm && to){
-      tm.classList.add("overlap-left");
-      to.classList.add("overlap-right");
-    }
-  }
-
-  /* === 結果オーバーレイ === */
-  function ensureResultOverlay(){
-    if (resultOverlayEl) return resultOverlayEl;
-    resultOverlayEl = document.createElement("div");
-    Object.assign(resultOverlayEl.style, {
-      position:"fixed", inset:"0", background:"rgba(0,0,0,0.5)",
-      display:"none", alignItems:"center", justifyContent:"center",
-      zIndex:"9999", backdropFilter:"blur(2px)"
-    });
-    const inner = document.createElement("div");
-    inner.id = "overlayResultInner";
-    Object.assign(inner.style, {
-      background:"#fff", borderRadius:"16px", padding:"24px 28px",
-      fontSize:"22px", textAlign:"center", minWidth:"260px",
-      boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700",
-      transform:"scale(.96)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
-    });
-    resultOverlayEl.appendChild(inner);
-    document.body.appendChild(resultOverlayEl);
-    return resultOverlayEl;
-  }
-  function showResultOverlay(text, ms=RESULT_SHOW_MS){
-    const el = ensureResultOverlay();
-    const inner = el.querySelector("#overlayResultInner");
-    inner.textContent = text;
-    el.style.display = "flex";
-    requestAnimationFrame(()=>{
-      inner.style.transform = "scale(1)";
-      inner.style.opacity = "1";
-    });
-    if (resultOverlayTimerId) clearTimeout(resultOverlayTimerId);
-    resultOverlayTimerId = setTimeout(hideResultOverlay, ms);
-  }
-  function hideResultOverlay(){
-    if (!resultOverlayEl) return;
-    const inner = resultOverlayEl.querySelector("#overlayResultInner");
-    if (inner){
-      inner.style.transform = "scale(.96)";
-      inner.style.opacity = "0";
-    }
-    setTimeout(()=>{ resultOverlayEl.style.display = "none"; }, 180);
-    if (resultOverlayTimerId) { clearTimeout(resultOverlayTimerId); resultOverlayTimerId = null; }
-  }
-
-  /* === 数字カウントダウン用 === */
-  function ensureCountdownOverlay(){
-    if (countdownOverlayEl) return countdownOverlayEl;
-    countdownOverlayEl = document.createElement("div");
-    Object.assign(countdownOverlayEl.style, {
-      position:"fixed", inset:"0", background:"rgba(0,0,0,0.45)",
-      display:"none", alignItems:"center", justifyContent:"center",
-      zIndex:"9998", backdropFilter:"blur(2px)"
-    });
-    const inner = document.createElement("div");
-    inner.id = "overlayCountdownInner";
-    Object.assign(inner.style, {
-      background:"#fff", borderRadius:"16px", padding:"18px 24px",
-      fontSize:"64px", textAlign:"center", minWidth:"160px",
-      boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"900",
-      transform:"scale(.94)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
-    });
-    countdownOverlayEl.appendChild(inner);
-    document.body.appendChild(countdownOverlayEl);
-    return countdownOverlayEl;
-  }
-  function showCountdownOverlay(n){
-    const el = ensureCountdownOverlay();
-    const inner = el.querySelector("#overlayCountdownInner");
-    inner.textContent = `${n}`;
-    if (el.style.display!=="flex"){
-      el.style.display = "flex";
-      requestAnimationFrame(()=>{
-        inner.style.transform = "scale(1)";
-        inner.style.opacity = "1";
-      });
-    }
-  }
-  function hideCountdownOverlay(){
-    if (!countdownOverlayEl) return;
-    const inner = countdownOverlayEl.querySelector("#overlayCountdownInner");
-    if (inner){
-      inner.style.transform = "scale(.94)";
-      inner.style.opacity = "0";
-    }
-    setTimeout(()=>{ countdownOverlayEl.style.display = "none"; }, 180);
-  }
-
-  /* === 接続確認 === */
-  function waitForConnected(db, timeoutMs = 10000){
-    return new Promise(resolve=>{
-      const connectedRef = ref(db, ".info/connected");
-      let done = false;
-      const to = setTimeout(()=>{
-        if (!done){ done = true; resolve(false); }
-      }, timeoutMs);
-      onValue(connectedRef, snap=>{
-        const v = !!snap.val();
-        if (v && !done){ done = true; clearTimeout(to); resolve(true); }
-      }, { onlyOnce:true });
-    });
-  }
-
-  /* [22] ユーティリティ */
+  /* [16] 補助 */
   function randomBasicHand(){
     let rest = BASIC_TOTAL - BASIC_MIN*3;
-    let g = BASIC_MIN; let c = BASIC_MIN; let p = BASIC_MIN;
+    let g = BASIC_MIN, c = BASIC_MIN, p = BASIC_MIN;
     const add = [0,0,0];
     for(let i=0;i<rest;i++){ add[Math.floor(Math.random()*3)]++; }
     g += add[0]; c += add[1]; p += add[2];
@@ -1200,22 +888,18 @@ async function ensureFirebaseAPI(){
   function randomItems(total=4){
     const items = { WIN:0, SWAP:0, BARRIER:0 };
     const keys = ["WIN","SWAP","BARRIER"];
-    for(let i=0;i<total;i++){
-      const k = keys[Math.floor(Math.random()*keys.length)];
-      items[k]++;
-    }
+    for(let i=0;i<total;i++){ const k = keys[Math.floor(Math.random()*keys.length)]; items[k]++; }
     return items;
   }
   function randomHand(){ return { ...randomBasicHand(), ...randomItems(4) }; }
-
   function updateCounts(h){
     if (!h) return;
-    cntG && (cntG.textContent = `×${h.G||0}`);
-    cntC && (cntC.textContent = `×${h.C||0}`);
-    cntP && (cntP.textContent = `×${h.P||0}`);
-    cntWIN && (cntWIN.textContent = `×${h.WIN||0}`);
-    cntSWAP && (cntSWAP.textContent = `×${h.SWAP||0}`);
-    cntBARRIER && (cntBARRIER.textContent = `×${h.BARRIER||0}`);
+    if (cntG) cntG.textContent = `×${h.G||0}`;
+    if (cntC) cntC.textContent = `×${h.C||0}`;
+    if (cntP) cntP.textContent = `×${h.P||0}`;
+    if (cntWIN) cntWIN.textContent = `×${h.WIN||0}`;
+    if (cntSWAP) cntSWAP.textContent = `×${h.SWAP||0}`;
+    if (cntBARRIER) cntBARRIER.textContent = `×${h.BARRIER||0}`;
   }
   function isBasic(x){ return x==="G"||x==="C"||x==="P"; }
   function gain(x){ return x==="G"?3:x==="C"?4:5; }
@@ -1229,11 +913,7 @@ async function ensureFirebaseAPI(){
         if (opDelta>0) return `相手の勝ち… 相手が +${opDelta} マス`;
         return "あいこ";
       }
-      case "win": {
-        if (r.winner===seatKey) return "あなたの必勝！ +4";
-        if (r.winner) return "相手の必勝！ +4";
-        return "必勝同士";
-      }
+      case "win": { if (r.winner===seatKey) return "あなたの必勝！ +4"; if (r.winner) return "相手の必勝！ +4"; return "必勝同士"; }
       case "swap": return "位置を交換！";
       case "barrier": return (r.winner===seatKey) ? "あなたのバリアが防いだ" : "相手のバリアが防いだ";
       case "barrier-penalty": {
@@ -1254,6 +934,48 @@ async function ensureFirebaseAPI(){
   function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
+  // 秒飛びゼロの精密カウントダウン（次の秒境界に合わせて待つ）
+  function preciseSecCountdown(deadlineMs, onTick, onZero){
+    let stopped = false;
+    function loop(){
+      if (stopped) return;
+      const now = Date.now();
+      const remain = Math.max(0, deadlineMs - now);
+      const sec = Math.floor((remain + 999) / 1000);
+      onTick(sec);
+      if (remain <= 0){
+        if (onZero) onZero();
+        return;
+      }
+      const next = remain % 1000 || 1000;
+      setTimeout(loop, next);
+    }
+    loop();
+    return ()=>{ stopped = true; };
+  }
+
+  // RTDB 接続（.info/connected）を最大timeoutMs待ってみる（未接続でも続行は可能）
+  function waitForConnected(db, timeoutMs = 10000){
+    return new Promise(resolve=>{
+      const connectedRef = ref(db, ".info/connected");
+      let settled = false;
+      const to = setTimeout(()=>{
+        if (!settled){ settled = true; try{ off(connectedRef); }catch(_){ } resolve(false); }
+      }, timeoutMs);
+      const cb = (snap)=>{
+        const v = !!snap.val();
+        if (v && !settled){
+          settled = true;
+          clearTimeout(to);
+          try{ off(connectedRef, 'value', cb); }catch(_){}
+          resolve(true);
+        }
+      };
+      onValue(connectedRef, cb);
+    });
+  }
+
+  // ラウンド結果の要約（自分視点テキスト）
   function makeRoundSummary(r, mySeat){
     const seatKey = mySeat || (seat==="p1"?"p1":"p2");
     if (r.swap) return "🔁 位置を交換！";
@@ -1283,8 +1005,9 @@ async function ensureFirebaseAPI(){
     return "—";
   }
 
-  /* === ポーラー === */
+  /* [17] ポーラー */
   function ensurePollers(){
+    // カウントダウン数字表示（双方）
     if (!countdownTicker){
       countdownTicker = setInterval(()=>{
         if (!curRoom) return;
@@ -1295,9 +1018,10 @@ async function ensureFirebaseAPI(){
         const remain = Math.max(0, Math.ceil((curRoom.revealUntilMs - Date.now())/1000));
         if (remain > 0) showCountdownOverlay(remain);
         else hideCountdownOverlay();
-      }, COUNTDOWN_TICK_MS);
+      }, 250);
     }
 
+    // p1側：演出→結果→次R／再戦成立→自動新規
     if (seat === "p1" && !revealApplyPoller){
       revealApplyPoller = setInterval(async ()=>{
         if (!curRoom) return;
@@ -1321,15 +1045,13 @@ async function ensureFirebaseAPI(){
 
         if (curRoom.state==="ended"){
           const v = curRoom.rematchVotes || {p1:false,p2:false};
-          if (v.p1 && v.p2){
-            await startNewMatch();
-          }
+          if (v.p1 && v.p2){ await startNewMatch(); }
         }
       }, 200);
     }
   }
 
-  /* === 再戦系 === */
+  /* [18] 再戦UI */
   function showRematchOverlay(d){
     let box = document.getElementById("rematchBox");
     if (!box){
@@ -1386,14 +1108,245 @@ async function ensureFirebaseAPI(){
       "players/p1/choice": null,
       "players/p2/choice": null,
       "players/p1/hand": randomHand(),
-      "players/p2/hand": randomHand(),
-      "players/p1/ready": false,
-      "players/p2/ready": false
+      "players/p2/hand": randomHand()
     });
     roundLocked = false;
     selectedCard = null;
     hideResultOverlay();
   }
 
-  function prettyResultTextForLabel(r, mySeat){ return prettyResult(r, mySeat); }
-})();  // ← 末尾に余計なテキストを付けないこと！
+  /* [19] ランダム対戦内部（奪取・待機票） */
+  function isMissingIndexError(err){
+    const s = String(err?.message || err || "");
+    return /index\s*not\s*defined|\.indexOn/i.test(s);
+  }
+
+  async function enqueueAndWait({ deadlineAt } = {}){
+    let myTicketRef = null;
+    try{
+      myTicketRef = push(ref(db, 'mm/queue'));
+      await set(myTicketRef, {
+        uid: myId,
+        name: myName || "GUEST",
+        ts: serverTimestamp(),
+        claimedBy: null,
+        roomId: null,
+        status: "waiting"
+      });
+      try{ onDisconnect(myTicketRef).remove(); }catch(_){}
+    }catch(err){
+      return { ok:false, reason:"QUEUE_WRITE_DENIED: " + (err?.message || err) };
+    }
+    Match.ticketRef = myTicketRef;
+
+    return await new Promise((resolve)=>{
+      const msLeft = Math.max(0, (deadlineAt||0) - Date.now());
+      Match.timeoutId = setTimeout(async ()=>{
+        try{ await update(myTicketRef, { status:"timeout" }); }catch(_){}
+        try{ await remove(myTicketRef); }catch(_){}
+        resolve({ ok:false, reason:"TIMEOUT" });
+      }, msLeft);
+
+      const onTicket = async (snap)=>{
+        const v = snap.val();
+        if (!v){
+          if (Match.timeoutId){ clearTimeout(Match.timeoutId); Match.timeoutId = null; }
+          off(myTicketRef, 'value', onTicket);
+          resolve({ ok:false, reason:"CANCELLED" });
+          return;
+        }
+        if (v.roomId){
+          if (Match.timeoutId){ clearTimeout(Match.timeoutId); Match.timeoutId = null; }
+          off(myTicketRef, 'value', onTicket);
+          try{ await remove(myTicketRef); }catch(_){}
+          resolve({ ok:true, roomId: v.roomId });
+        }
+      };
+      Match.onTicket = onTicket;
+      Match._onRef = myTicketRef;
+      onValue(myTicketRef, onTicket);
+    });
+  }
+
+  async function tryClaimOne(){
+    try{
+      // status==='waiting' のみ対象（キャンセル済みを拾わない）
+      const q = query(ref(db, 'mm/queue'), orderByChild('status'), equalTo('waiting'), limitToFirst(50));
+      const list = await get(q);
+
+      const arr = [];
+      list.forEach(snap=>{
+        const v = snap.val(); const k = snap.key;
+        if (!v || v.uid === myId) return;
+        if (v.claimedBy != null) return;
+        arr.push({ k, v });
+      });
+      arr.sort((a,b)=> (a.v.ts||0) - (b.v.ts||0));
+      if (!arr.length) return { ok:false, reason:"EMPTY" };
+
+      const candKey = arr[0].k; const candVal = arr[0].v;
+      const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
+      const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
+      if (!(tx.committed && tx.snapshot.val() === myId)) return { ok:false, reason:"LOST_RACE" };
+
+      const newRoomId = rid(6);
+      await set(ref(db, `rooms/${newRoomId}`), {
+        createdAt: serverTimestamp(),
+        state: "lobby",
+        round: 0,
+        minRounds: MIN_ROUNDS,
+        boardSize: BOARD_SIZE,
+        roundStartMs: null,
+        lastResult: null,
+        revealRound: null,
+        revealUntilMs: null,
+        rematchVotes: { p1:false, p2:false },
+        players: {
+          p1: { id: candVal.uid, name: candVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false },
+          p2: { id: myId,       name: myName    || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false }
+        }
+      });
+      await update(ref(db, `mm/queue/${candKey}`), { status:"paired", roomId: newRoomId });
+      return { ok:true, roomId: newRoomId };
+
+    }catch(err){
+      // インデックス無し環境向けフォールバック
+      try{
+        const allSnap = await get(ref(db, 'mm/queue'));
+        const all = allSnap.exists() ? allSnap.val() : {};
+        const arr = Object.entries(all)
+          .filter(([k,v])=> v && v.uid !== myId && v.claimedBy == null && v.status === 'waiting')
+          .sort((a,b)=> ((a[1].ts||0) - (b[1].ts||0)));
+        if (!arr.length) return { ok:false, reason:"EMPTY" };
+
+        const [candKey, candVal] = arr[0];
+        const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
+        const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
+        if (!(tx.committed && tx.snapshot.val() === myId)) return { ok:false, reason:"LOST_RACE" };
+
+        const newRoomId = rid(6);
+        await set(ref(db, `rooms/${newRoomId}`), {
+          createdAt: serverTimestamp(),
+          state: "lobby",
+          round: 0,
+          minRounds: MIN_ROUNDS,
+          boardSize: BOARD_SIZE,
+          roundStartMs: null,
+          lastResult: null,
+          revealRound: null,
+          revealUntilMs: null,
+          rematchVotes: { p1:false, p2:false },
+          players: {
+            p1: { id: candVal.uid, name: candVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false },
+            p2: { id: myId,       name: myName    || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false }
+          }
+        });
+        await update(ref(db, `mm/queue/${candKey}`), { status:"paired", roomId: newRoomId });
+        return { ok:true, roomId: newRoomId };
+      }catch(e2){
+        return { ok:false, reason: isMissingIndexError(err) ? ("INDEX_FALLBACK_FAILED: " + (e2?.message || e2)) : ("QUERY_ERROR: " + (err?.message || err)) };
+      }
+    }
+  }
+
+  /* [20] ゲーム開始/退出/広告 */
+  async function maybeAdThenStart(){
+    const showAd = Math.random() < 0.5;
+    const isNative = !!window.Capacitor?.isNativePlatform;
+    const AdMob = window.Capacitor?.Plugins?.AdMob;
+    if (isNative && showAd && AdMob){
+      try {
+        await AdMob.initialize({ requestTrackingAuthorization: true });
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        const adId = isIOS
+          ? "ca-app-pub-3940256099942544/6978759866"
+          : "ca-app-pub-3940256099942544/5354046379";
+        await AdMob.prepareRewardedInterstitial({ adId });
+        await AdMob.showRewardedInterstitial();
+      } catch (e) {
+        console.warn("Ad error, start anyway:", e);
+      }
+      await startGame();
+      return;
+    }
+    await startGame();
+  }
+
+  async function startGame(){
+    const snap = await get(ref(db, `rooms/${roomId}`));
+    if (!snap.exists()) { alert("部屋が見つかりません"); return; }
+    const d = snap.val();
+    if (seat !== "p1") { alert("ホストのみ開始できます"); return; }
+    const hasP1 = !!d?.players?.p1?.id;
+    const hasP2 = !!d?.players?.p2?.id;
+    if (!(hasP1 && hasP2)) { alert("2人そろってから開始できます"); return; }
+    if (d.state === "playing") return;
+
+    await update(ref(db, `rooms/${roomId}`), {
+      state: "playing",
+      round: 1,
+      roundStartMs: Date.now(),
+      lastResult: null,
+      revealRound: null,
+      revealUntilMs: null,
+      rematchVotes: { p1:false, p2:false },
+      "players/p1/pos": 0,
+      "players/p2/pos": 0,
+      "players/p1/choice": null,
+      "players/p2/choice": null,
+      "players/p1/hand": randomHand(),
+      "players/p2/hand": randomHand()
+    });
+  }
+
+  async function leaveRoom(){
+    try {
+      if (btnLeave) btnLeave.disabled = true;
+      if (btnExit)  btnExit.disabled  = true;
+
+      if (!roomId){
+        // ロビー購読解除
+        if (roomRefObj && roomListener){ try{ off(roomRefObj, 'value', roomListener); }catch(_){ } }
+        location.reload();
+        return;
+      }
+
+      const snap = await get(ref(db, `rooms/${roomId}`));
+      if (!snap.exists()) {
+        if (roomRefObj && roomListener){ try{ off(roomRefObj, 'value', roomListener); }catch(_){ } }
+        location.reload();
+        return;
+      }
+      const d = snap.val();
+
+      if (seat === "p1") {
+        await remove(ref(db, `rooms/${roomId}`));
+      } else {
+        const base = `rooms/${roomId}/players/p2`;
+        const updates = {};
+        updates[`${base}/id`]       = null;
+        updates[`${base}/name`]     = null;
+        updates[`${base}/pos`]      = 0;
+        updates[`${base}/choice`]   = null;
+        updates[`${base}/hand`]     = randomHand();
+        updates[`${base}/joinedAt`] = null;
+
+        if (d.state === "playing") {
+          updates[`rooms/${roomId}/state`]         = "lobby";
+          updates[`rooms/${roomId}/round`]         = 0;
+          updates[`rooms/${roomId}/roundStartMs`]  = null;
+          updates[`rooms/${roomId}/lastResult`]    = null;
+          updates[`rooms/${roomId}/revealRound`]   = null;
+          updates[`rooms/${roomId}/revealUntilMs`] = null;
+        }
+        await update(ref(db), updates);
+      }
+    } catch (err) {
+      console.error("leaveRoom error:", err);
+      alert("退出に失敗しました。ネットワークを確認してもう一度お試しください。");
+    } finally {
+      if (roomRefObj && roomListener){ try{ off(roomRefObj, 'value', roomListener); }catch(_){ } }
+      setTimeout(()=>location.reload(), 150);
+    }
+  }
+})();
