@@ -1,11 +1,12 @@
 // service-worker.js
-const CACHE_NAME = 'rps-cards-v1.0.1'; // ← リリース毎に上げる
+const CACHE_NAME = 'rps-cards-v1.0.2'; // ← リリース毎に上げる
 const APP_SHELL = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './manifest.json',
+  './offline.html',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/maskable-512.png'
@@ -60,7 +61,7 @@ self.addEventListener('fetch', (event) => {
         caches.open(CACHE_NAME).then((c) => c.put(req, copy));
         return res;
       }).catch(() =>
-        caches.match('./index.html')
+        caches.match('./offline.html')
       )
     );
     return;
