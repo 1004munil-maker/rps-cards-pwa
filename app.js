@@ -1490,8 +1490,6 @@ async function ensureAnonAuth(app){
   }
 
   /* ====== スタンプ：UI & DB同期 ====== */
-// ====== スタンプ：UI & DB同期 ======
-let btnStamp = null;
 
 function ensureStampButton(){
   if (btnStamp) return btnStamp;
