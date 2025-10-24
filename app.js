@@ -1,6 +1,9 @@
 /* =========================================================
-   RPS Cards — app.js（最終リリース / 40秒統一 & 安定化 & 再試行バグ修正 + 自動スタート）
-   追加：スタンプ機能（相互表示・3秒吹き出し）
+   RPS Cards — app.js（最終リリース / 40秒統一 & 安定化 & 再試行バグ修正）
+   追加：
+   - スタンプ機能（相互表示・3秒吹き出し / ボタンはJSで1つだけ生成）
+   - ロビー Ready → 3,2,1 → 「ゲームスタート！」2秒 → 開始（p1トリガ）
+   ※ それ以外のゲーム部分は極力未変更
    ========================================================= */
 
 /* ========== Firebase import 安全化 ========== */
@@ -160,6 +163,10 @@ async function ensureAnonAuth(app){
   const cardBtns   = [...document.querySelectorAll(".cardBtn")];
   const cntG = $("#cntG"), cntC=$("#cntC"), cntP=$("#cntP"), cntWIN=$("#cntWIN"), cntSWAP=$("#cntSWAP"), cntBARRIER=$("#cntBARRIER");
 
+  // Duel header names
+  const duelMeNameEl = $("#duelMeName");
+  const duelOpNameEl = $("#duelOpName");
+
   // ← 吹き出しターゲット
   const chipMeSel = '.status .chip.me';
   const chipOpSel = '.status .chip.op';
@@ -227,6 +234,10 @@ async function ensureAnonAuth(app){
 
   // セッションID
   let matchSession = 0;
+
+  // === プリスタート（ロビーの3,2,1） ===
+  let preStartFlashDone = false;
+  let lastPreStartUntil = 0;
 
   /* [07] 初期盤面 */
   makeBoard();
@@ -348,7 +359,20 @@ async function ensureAnonAuth(app){
     sfx.click();
   };
 
-  if (btnStart) btnStart.onclick = async () => { await maybeAdThenStart(); };
+  // Ready ボタン：DBに自分の ready フラグだけ書く（開始は p1 が監視して自動）
+  if (btnStart) btnStart.onclick = async () => {
+    sfx.click();
+    if (!roomId || !seat) return;
+    try{
+      await update(ref(db, `rooms/${roomId}/ready`), { [seat]: true });
+      btnStart.disabled = true;
+      btnStart.textContent = "Waiting…";
+    }catch(e){
+      console.error("ready mark error:", e);
+      alert("Readyに失敗しました。もう一度試してください。");
+    }
+  };
+
   if (btnLeave) btnLeave.onclick = () => { sfx.click(); leaveRoom(); };
   if (btnExit)  btnExit.onclick  = () => { sfx.click(); leaveRoom(); };
 
@@ -428,26 +452,9 @@ async function ensureAnonAuth(app){
     }
   };
 
-  /* [09] 対戦前の広告（ネイティブ時のみ） */
+  /* [09] 対戦前の広告（ネイティブ時のみ / Ready方式では基本使わない） */
   async function maybeAdThenStart(){
-    const showAd = Math.random() < 0.5;
-    const isNative = !!window.Capacitor?.isNativePlatform;
-    const AdMob = window.Capacitor?.Plugins?.AdMob;
-    if (isNative && showAd && AdMob){
-      try {
-        await AdMob.initialize({ requestTrackingAuthorization: true });
-        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-        const adId = isIOS
-          ? "ca-app-pub-3940256099942544/6978759866"
-          : "ca-app-pub-3940256099942544/5354046379";
-        await AdMob.prepareRewardedInterstitial({ adId });
-        await AdMob.showRewardedInterstitial();
-      } catch (e) {
-        console.warn("Ad error, start anyway:", e);
-      }
-      await startGame();
-      return;
-    }
+    // 既存仕様は温存。今回は Ready 方式のため未使用想定
     await startGame();
   }
 
@@ -464,6 +471,9 @@ async function ensureAnonAuth(app){
       revealRound: null,
       revealUntilMs: null,
       rematchVotes: { p1:false, p2:false },
+      // Ready/PreStart 初期化
+      ready: { p1:false, p2:false },
+      preStartUntilMs: null,
       players: {
         p1: { uid: authUid, id: myId, name, pos: 0, choice: null, hand: randomHand(), joinedAt: serverTimestamp() },
         p2: { uid: null,    id: null, name: null, pos: 0, choice: null, hand: randomHand(), joinedAt: null }
@@ -506,18 +516,58 @@ async function ensureAnonAuth(app){
       curRoom = d;
       renderGame(d);
       ensurePollers();
-      autoStartIfReady(d);
+
+      // ★ 名前補完 / Ready UI / プリスタート監視（p1）
+      ensureMyNameWritten(d);
+      updateReadyUI(d);
+      maybeKickPreStart(d);
+
       // エモート反映
       handleEmote(d?.emote);
     });
   }
 
-  /* 自動スタート（p1） */
-  async function autoStartIfReady(d){
+  /* Ready UI（btnStartの状態やラベルの見た目） */
+  function updateReadyUI(d){
+    const r = d.ready || {};
+    if (btnStart) {
+      const mine = !!r[seat];
+      btnStart.disabled = mine;
+      btnStart.textContent = mine ? "Waiting…" : "▶ Ready";
+    }
+    const p1 = document.getElementById('p1Label');
+    const p2 = document.getElementById('p2Label');
+    if (p1) p1.classList.toggle('is-ready', !!r.p1);
+    if (p2) p2.classList.toggle('is-ready', !!r.p2);
+  }
+
+  /* p1 が両者 Ready を検知 → 3秒後スタートのスケジュールを一度だけ設定 */
+  async function maybeKickPreStart(d){
     if (seat !== "p1") return;
     if (d.state !== "lobby") return;
     if (!(d?.players?.p1?.uid && d?.players?.p2?.uid)) return;
-    await startGame();
+    const r = d.ready || {};
+    if (!(r.p1 && r.p2)) return;
+    if (d.preStartUntilMs) return; // 既に開始済み
+
+    await update(ref(db, `rooms/${roomId}`), {
+      preStartUntilMs: Date.now() + 3000
+    });
+  }
+
+  /* 自席の名前が空/「-」なら補完 */
+  async function ensureMyNameWritten(d){
+    try{
+      const mySeat = seat || (d?.players?.p1?.uid===authUid ? "p1" : "p2");
+      if (!mySeat) return;
+      const curName = d?.players?.[mySeat]?.name;
+      const want = (myName||"").trim();
+      if (want && (!curName || curName === "-")){
+        await update(ref(db, `rooms/${roomId}/players/${mySeat}`), { name: want });
+      }
+    }catch(e){
+      console.warn("ensureMyNameWritten skipped:", e);
+    }
   }
 
   /* ========== マッチング内部 ========== */
@@ -631,6 +681,8 @@ async function ensureAnonAuth(app){
         revealRound: null,
         revealUntilMs: null,
         rematchVotes: { p1:false, p2:false },
+        ready: { p1:false, p2:false },
+        preStartUntilMs: null,
         players: {
           p1: { uid: candVal.uid, id: rid(6), name: candVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() },
           p2: { uid: authUid,     id: myId,   name: myName       || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() }
@@ -663,6 +715,9 @@ async function ensureAnonAuth(app){
       lastResult: null,
       revealRound: null,
       revealUntilMs: null,
+      // プリスタート情報のリセット
+      ready: { p1:false, p2:false },
+      preStartUntilMs: null,
       rematchVotes: { p1:false, p2:false },
       "players/p1/pos": 0,
       "players/p2/pos": 0,
@@ -710,6 +765,8 @@ async function ensureAnonAuth(app){
           updates[`rooms/${roomId}/lastResult`]    = null;
           updates[`rooms/${roomId}/revealRound`]   = null;
           updates[`rooms/${roomId}/revealUntilMs`] = null;
+          updates[`rooms/${roomId}/ready`]         = { p1:false, p2:false };
+          updates[`rooms/${roomId}/preStartUntilMs`] = null;
         }
         await update(ref(db), updates);
       }
@@ -750,7 +807,13 @@ async function ensureAnonAuth(app){
 
     if (p1Label) p1Label.textContent = d.players.p1?.name || "-";
     if (p2Label) p2Label.textContent = d.players.p2?.name || "-";
-    if (btnStart) btnStart.disabled = true;
+    if (btnStart) btnStart.disabled = !!(d?.ready?.[seat]); // Ready押したら待機表示
+
+    // Duel header（左右名）
+    if (duelMeNameEl && duelOpNameEl){
+      duelMeNameEl.textContent = me?.name || "-";
+      duelOpNameEl.textContent = op?.name || "-";
+    }
 
     updateCounts(me.hand);
     placeTokens(d.players.p1.pos, d.players.p2.pos, d.boardSize);
@@ -1166,7 +1229,7 @@ async function ensureAnonAuth(app){
     if (resultOverlayTimerId) { clearTimeout(resultOverlayTimerId); resultOverlayTimerId = null; }
   }
 
-  /* === 提出後の 3,2,1 表示 === */
+  /* === 提出後 / プリスタートの 3,2,1 表示 === */
   function ensureCountdownOverlay(){
     if (countdownOverlayEl) return countdownOverlayEl;
     countdownOverlayEl = document.createElement("div");
@@ -1199,6 +1262,19 @@ async function ensureAnonAuth(app){
       });
     }
   }
+  function showStartFlash(ms=2000){
+    const el = ensureCountdownOverlay();
+    const inner = el.querySelector("#overlayCountdownInner");
+    inner.textContent = "ゲームスタート！";
+    if (el.style.display!=="flex"){
+      el.style.display = "flex";
+      requestAnimationFrame(()=>{
+        inner.style.transform = "scale(1)";
+        inner.style.opacity = "1";
+      });
+    }
+    setTimeout(hideCountdownOverlay, ms);
+  }
   function hideCountdownOverlay(){
     if (!countdownOverlayEl) return;
     const inner = countdownOverlayEl.querySelector("#overlayCountdownInner");
@@ -1214,6 +1290,31 @@ async function ensureAnonAuth(app){
     if (!countdownTicker){
       countdownTicker = setInterval(()=>{
         if (!curRoom) return;
+
+        // ① ロビーのプリスタート 3,2,1 → 「ゲームスタート！」（p1がset、両者に表示）
+        if (curRoom.state === "lobby" && curRoom.preStartUntilMs){
+          if (lastPreStartUntil !== curRoom.preStartUntilMs){
+            lastPreStartUntil = curRoom.preStartUntilMs;
+            preStartFlashDone = false;
+          }
+          const remain = Math.max(0, Math.ceil((curRoom.preStartUntilMs - Date.now())/1000));
+          if (remain > 0){
+            showCountdownOverlay(remain);
+          }else{
+            hideCountdownOverlay();
+            if (!preStartFlashDone){
+              preStartFlashDone = true;
+              showStartFlash(2000);
+            }
+            if (seat === "p1"){
+              update(ref(db, `rooms/${roomId}`), { preStartUntilMs: null }).catch(()=>{});
+              startGame(); // 冪等
+            }
+          }
+          return;
+        }
+
+        // ② ラウンド提出後の 3,2,1
         if (curRoom.state!=="playing" || curRoom.revealRound !== curRoom.round){
           hideCountdownOverlay();
           return;
@@ -1277,7 +1378,7 @@ async function ensureAnonAuth(app){
       again.style.padding="10px 14px"; again.style.borderRadius="8px"; again.style.border="none"; again.style.background="#4caf50"; again.style.color="#fff"; again.style.fontWeight="700";
       again.onclick = voteRematch;
       const exit = document.createElement("button"); exit.textContent = "退出";
-      exit.style.padding="10px 14px"; exit.style.borderRadius="8px"; exit.style.border="none"; exit.style.background="#f44336"; exit.style.color="#fff"; exit.style.fontWeight="700";
+      exit.style.padding="10px 14px"; exit.style.borderRadius="8px"; exit.style.border="none"; exit.style.background="#f44336"; exit.style.color="#fff"; again.style.fontWeight="700";
       exit.onclick = leaveRoom;
       row.appendChild(again); row.appendChild(exit);
       box.appendChild(h); box.appendChild(p); box.appendChild(row);

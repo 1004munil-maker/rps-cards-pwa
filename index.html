@@ -143,13 +143,10 @@
           <div class="row">
             <button id="btnPlay" class="primary" disabled>このカードを出す</button>
             <button id="btnClear" class="ghost">選択解除</button>
-            <!-- ★ スタンプボタン -->
-            <button id="btnStamp" class="ghost">スタンプ</button>
+            <!-- ※ スタンプボタンは JS が 1つだけ生成します（重複防止のためHTMLからは削除） -->
           </div>
           <p id="stateMsg" class="help">10秒以内に出してね（出さないと負け）</p>
         </section>
-
-        <!-- ★ revealカードは廃止 -->
 
         <div class="row">
           <button id="btnNext" class="hidden">次のラウンド</button>
@@ -172,20 +169,6 @@
         </script>
       </section>
     </main>
-  </div>
-
-  <!-- ★ スタンプ選択ポップアップ -->
-  <div id="stampPicker" class="stamp-picker hidden" role="dialog" aria-hidden="true">
-    <div class="stamp-grid">
-      <button class="stamp">😆</button>
-      <button class="stamp">🥺</button>
-      <button class="stamp">🤪</button>
-      <button class="stamp">🫤</button>
-      <button class="stamp">😊</button>
-      <button class="stamp">😭</button>
-      <button class="stamp">😓</button>
-      <button class="stamp">💕</button>
-    </div>
   </div>
 
   <!-- [B7] 横向き時のガード -->
