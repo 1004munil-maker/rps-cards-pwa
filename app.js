@@ -1,5 +1,5 @@
 /* =========================================================
-   RPS Cards — app.js (CLEAN FINAL — duplicate fix / stamp fix / random retry harden)
+   RPS Cards — app.js (FINAL — random fix / stamp fix / no dup)
    ========================================================= */
 
 /* ========== Firebase import 安全化 ========== */
@@ -127,7 +127,7 @@ async function ensureAnonAuth(app){
   const roomIdLabel= $("#roomIdLabel");
   const p1Label    = $("#p1Label");
   const p2Label    = $("#p2Label");
-  const btnStart   = $("#btnStart");   // Ready トグル
+  const btnStart   = $("#btnStart");
   const btnLeave   = $("#btnLeave");
 
   const game       = $("#game");
@@ -177,7 +177,6 @@ async function ensureAnonAuth(app){
   let stampUI = null;
   let stampUIVisible = false;
   let btnStamp = null;
-  let emoteTimers = { p1:null, p2:null };
   let lastEmoteKey = { p1:"", p2:"" };
 
   /* [06] 状態 */
@@ -197,7 +196,7 @@ async function ensureAnonAuth(app){
   let revealApplyPoller = null;
   let countdownTicker = null;
 
-  // オーバーレイ（※重複定義禁止）
+  // オーバーレイ（重複定義禁止）
   let resultOverlayEl = null;
   let resultOverlayTimerId = null;
   let countdownOverlayEl = null;
@@ -211,7 +210,7 @@ async function ensureAnonAuth(app){
   let matchSession = 0;
   let overallHardTimeoutId = null;
 
-  // 相手退室誤検知防止（前回の状態）
+  // 相手退室誤検知防止
   let prevOpUid = null;
 
   /* [07] 初期盤面 */
@@ -289,7 +288,7 @@ async function ensureAnonAuth(app){
   }
   async function cancelMatching(){
     matchAbort = true;
-    matchSession++; // 旧セッションを失効
+    matchSession++; // 旧セッション無効化
     try {
       if (typeof cleanupMatching === "function") { await cleanupMatching(); }
     } catch(_) {} finally {
@@ -396,7 +395,7 @@ async function ensureAnonAuth(app){
       stopOverallMatchCountdown();
       overallMatchCountdown = setInterval(updateOverall, 250);
 
-      // フェイルセーフ（40秒 + 少しだけ猶予で確実に閉じる）
+      // ハードタイムアウト（必ず閉じる&告知）
       stopOverallHardTimeout();
       overallHardTimeoutId = setTimeout(()=>{
         if (mySession === matchSession && isMatching && !matchAbort){
@@ -406,7 +405,7 @@ async function ensureAnonAuth(app){
         }
       }, OVERALL_SECONDS*1000 + 400);
 
-      // ① 既存待機者を10秒奪取
+      // ① 既存待機者 10秒奪取
       const claimRes = await pollAndClaimExisting({ seconds:10, silent:true, session: mySession });
       if (mySession !== matchSession || matchAbort) { resetMatchingUI(); return; }
       if (claimRes.ok){
@@ -458,7 +457,7 @@ async function ensureAnonAuth(app){
     await startGame();
   }
 
-  /* [10] ルーム作成（ready=false 初期化） */
+  /* [10] ルーム作成 */
   async function createRoom(id, name){
     await set(ref(db, `rooms/${id}`), {
       createdAt: serverTimestamp(),
@@ -479,7 +478,7 @@ async function ensureAnonAuth(app){
     });
   }
 
-  /* [10.5] 手動参加（最小更新：players/p2 のみ） */
+  /* [10.5] 手動参加（最小更新） */
   async function joinRoom(id, name){
     name = (name || "").trim().slice(0,20);
     if (!name) return { ok:false, reason:"NO_NAME" };
@@ -504,7 +503,7 @@ async function ensureAnonAuth(app){
     game?.classList.add("hidden");
     if (roomIdLabel) roomIdLabel.textContent = roomId;
 
-    prevOpUid = null; // 新規入室時にリセット
+    prevOpUid = null;
 
     const roomRef = ref(db, `rooms/${roomId}`);
     if (unsubRoom) unsubRoom();
@@ -516,7 +515,7 @@ async function ensureAnonAuth(app){
       // スタンプ反映
       handleEmote(d?.emote);
 
-      // 相手退室検知（前回:在席 → 今回:不在 のときだけ）
+      // 相手退室検知
       detectOpponentLeft(d);
 
       renderGame(d);
@@ -552,7 +551,7 @@ async function ensureAnonAuth(app){
     enterLobby();
   }
 
-  // 既存待機者を10秒奪取
+  // 既存待機者を奪取
   async function pollAndClaimExisting({ seconds = 10, silent = false, session } = {}){
     const until = Date.now() + seconds*1000;
     while(Date.now() < until){
@@ -569,7 +568,7 @@ async function ensureAnonAuth(app){
     return { ok:false, reason:"NO_EXISTING" };
   }
 
-  // 自分の待機票で 30秒待機
+  // 自分の待機票で待つ
   async function enqueueAndWait({ seconds = 30, silent = false, session } = {}){
     let myTicketRef = null;
     try{
@@ -636,7 +635,7 @@ async function ensureAnonAuth(app){
       if (arr.length){ candKey = arr[0].k; candVal = arr[0].v; }
       if (!candKey) return { ok:false, reason:"EMPTY" };
 
-      // ルールに沿った claimedBy のトランザクション
+      // claimedBy のトランザクション
       const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
       const tx = await runTransaction(claimRef, cur => (cur===null ? authUid : cur));
       if (!(tx.committed && tx.snapshot.val() === authUid)) return { ok:false, reason:"LOST_RACE" };
@@ -670,7 +669,7 @@ async function ensureAnonAuth(app){
     }
   }
 
-  /* [12] ゲーム開始（preparing → playing） */
+  /* [12] ゲーム開始 */
   async function startGame(){
     const snap = await get(ref(db, `rooms/${roomId}`));
     if (!snap.exists()) { alert("部屋が見つかりません"); return; }
@@ -756,7 +755,6 @@ async function ensureAnonAuth(app){
   let lastRoundStartMs = 0;
 
   function renderGame(d){
-    // ビュー切替
     if (d.state === "playing"){
       lobby?.classList.add("hidden");
       game?.classList.remove("hidden");
@@ -774,15 +772,12 @@ async function ensureAnonAuth(app){
     const me = d.players[meSeat];
     const op = d.players[opSeat];
 
-    // 決闘ヘッダ名
     if (duelMeName) duelMeName.replaceChildren(document.createTextNode(me?.name || "—"));
     if (duelOpName) duelOpName.replaceChildren(document.createTextNode(op?.name || "—"));
 
-    // ロビー名
     if (p1Label) p1Label.textContent = d.players.p1?.name || "-";
     if (p2Label) p2Label.textContent = d.players.p2?.name || "-";
 
-    // Readyボタン
     if (btnStart){
       const myReady = !!me?.ready;
       btnStart.textContent = myReady ? "✅ Ready取り消し" : "▶ Ready";
@@ -827,7 +822,6 @@ async function ensureAnonAuth(app){
     if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8 || iSubmitted || endedThisRound || revealing || d.state!=="playing";
     if (btnPlay) btnPlay.disabled = !selectedCard || iSubmitted || endedThisRound || revealing || d.state!=="playing";
 
-    // 状態メッセ
     if (stateMsg){
       if (d.state === "ended"){
         const w = d.lastResult?.winner;
@@ -851,15 +845,12 @@ async function ensureAnonAuth(app){
       }
     }
 
-    // ロビー：両者Readyで p1 が preparing 開始
     if (d.state === "lobby" && seat==="p1" && d.players?.p1?.ready && d.players?.p2?.ready){
       if (!d.preStartUntilMs){ startPreStartCountdown(); }
     }
 
-    // プレイ中のタイマー
     setupTimer(d.roundStartMs, d.round, me.choice, op.choice, d);
 
-    // 両提出でリビール
     if (bothSubmitted && seat==="p1" && !revealing && !endedThisRound && d.state==="playing"){
       update(ref(db, `rooms/${roomId}`), {
         revealRound: d.round,
@@ -876,18 +867,16 @@ async function ensureAnonAuth(app){
     if (!endedThisRound && !revealing && overlayShownRound !== d.round){ hideResultOverlay(); }
   }
 
-  /* [14.5] 相手退室の検知（遷移のみ） */
+  /* [14.5] 相手退室の検知 */
   function detectOpponentLeft(d){
     const meSeat = seat;
     const opSeat = seat==="p1" ? "p2" : "p1";
     const opUid = d.players?.[opSeat]?.uid || null;
 
-    // 初回は基準だけ更新（誤検知防止）
     if (prevOpUid === null){
       prevOpUid = opUid;
       return;
     }
-    // 在席→不在に変わった時だけ通知・処理
     if (prevOpUid && !opUid){
       prevOpUid = opUid;
       alert("相手が退室しました。");
@@ -1053,7 +1042,7 @@ async function ensureAnonAuth(app){
     return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0} };
   }
 
-  /* [19] 判定（BARRIERのOR条件バグ修正済み） */
+  /* [19] 判定（BARRIER条件修正済み） */
   function judgeRound(p1, p2){
     const a = p1.choice, b = p2.choice;
 
@@ -1242,7 +1231,7 @@ async function ensureAnonAuth(app){
     if (resultOverlayTimerId) { clearTimeout(resultOverlayTimerId); resultOverlayTimerId = null; }
   }
 
-  /* === カウントオーバーレイ（数字64px／開始文字36px） === */
+  /* === カウントオーバーレイ === */
   function ensureCountdownOverlay(){
     if (countdownOverlayEl) return countdownOverlayEl;
     countdownOverlayEl = document.createElement("div");
@@ -1266,7 +1255,7 @@ async function ensureAnonAuth(app){
   function showCountdownOverlay(textOrNumber, opts={}){
     const el = ensureCountdownOverlay();
     const inner = el.querySelector("#overlayCountdownInner");
-    inner.style.fontSize = (opts.fontSize!=null) ? `${opts.fontSize}px` : (typeof textOrNumber==="number" ? "64px" : "64px");
+    inner.style.fontSize = (opts.fontSize!=null) ? `${opts.fontSize}px` : "64px";
     inner.textContent = `${textOrNumber}`;
     if (el.style.display!=="flex"){
       el.style.display = "flex";
@@ -1445,15 +1434,36 @@ async function ensureAnonAuth(app){
     if (cntBARRIER) cntBARRIER.textContent = `×${h.BARRIER||0}`;
   }
   function gain(x){ return x==="G"?3:x==="C"?4:x==="P"?5:0; }
-  function toFace(x){ return x==="G"?"✊":x==="C"?"✌️":x==="P"?"🫲":x==="WIN"?"👑":x==="SWAP"?"🔁":x==="BARRIER"?"🛡️":null; }
   function clampN(x,n){ return Math.max(0, Math.min(n, x)); }
   function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
+  // ★ ここが前回欠けていた：接続確認（失敗でも2秒で先へ）
+  function waitForConnected(db, timeoutMs=2000){
+    return new Promise((resolve)=>{
+      let settled = false;
+      const r = ref(db, ".info/connected");
+      const unsub = onValue(r, snap=>{
+        if (!settled && !!snap.val()){
+          settled = true;
+          try{ unsub(); }catch(_){}
+          resolve(true);
+        }
+      });
+      setTimeout(()=>{
+        if (!settled){
+          settled = true;
+          try{ unsub(); }catch(_){}
+          resolve(false); // 接続検出できなくても続行
+        }
+      }, timeoutMs);
+    });
+  }
+
   function makeRoundSummary(r, mySeat){
     const seatKey = mySeat || (seat==="p1"?"p1":"p2");
     if (r.swap) return "🔁 位置を交換！";
-    if (r.type === "barrier") return (r.winner===seatKey) ? "🛡️ バリアで防いだ！" : "🛡️ 相手のバリアが発動";
+    if (r.type === "barrier") return (r.winner===seatKey) ? "🛡️ 防いだ！" : "🛡️ 相手のバリアが発動";
     if (r.type === "barrier-penalty") {
       const myDelta = r.delta?.[seatKey] ?? 0;
       return myDelta<0 ? "🛡️ バリアのペナルティ：あなたが -1" : "🛡️ バリアのペナルティ：相手が -1";
@@ -1529,21 +1539,19 @@ async function ensureAnonAuth(app){
     }catch(e){ console.warn('stamp failed', e); }
   }
 
-  // ★ “自分/相手” へ正しく出す（seat によるマッピング修正版）
+  // 自分/相手に正しく出す
   function pickEmoteAnchor(seatKey){
-    const amIMe = (seatKey === seat); // seatKey が自分の席と一致したら自分側
+    const amIMe = (seatKey === seat);
     const gameVisible = !game?.classList.contains('hidden');
     if (gameVisible){
       return document.querySelector(amIMe ? chipMeSel : chipOpSel);
     }
-    // ロビーではラベル側も自分/相手で切替
     if (amIMe){
       return document.getElementById(seat==='p1' ? 'p1Label' : 'p2Label');
     }else{
       return document.getElementById(seat==='p1' ? 'p2Label' : 'p1Label');
     }
   }
-
   function handleEmote(emote){
     if (!emote) return;
     const now = Date.now();
@@ -1553,8 +1561,8 @@ async function ensureAnonAuth(app){
       const remain = (e.untilMs||0) - now;
       if (remain <= 0) return;
       const key = `${e.emoji}|${e.untilMs}`;
-      if (lastEmoteKey[k] === key) return;
-      lastEmoteKey[k] = key;
+      if (key === (k==='p1'?lastEmoteKey.p1:lastEmoteKey.p2)) return;
+      if (k==='p1') lastEmoteKey.p1 = key; else lastEmoteKey.p2 = key;
 
       const targetEl = pickEmoteAnchor(k);
       if (!targetEl) return;
@@ -1562,10 +1570,8 @@ async function ensureAnonAuth(app){
     });
   }
   function showEmojiBubble(targetEl, emoji, duration=3000){
-    if (!targetEl) return;
     const rect = targetEl.getBoundingClientRect();
     const bubble = document.createElement("div");
-    bubble.className = 'emote-bubble';
     Object.assign(bubble.style, {
       position:'fixed',
       left: (rect.left + rect.width/2) + 'px',
@@ -1586,69 +1592,11 @@ async function ensureAnonAuth(app){
       bubble.style.opacity = '1';
       bubble.style.transform = 'translate(-50%, -110%)';
     });
-
     const kill = ()=> {
       bubble.style.opacity = '0';
       bubble.style.transform = 'translate(-50%, -90%)';
       setTimeout(()=> bubble.remove(), 160);
     };
     setTimeout(kill, Math.max(300, duration));
-  }
-
-  /* === pollers === */
-  function ensurePollers(){
-    if (!countdownTicker){
-      countdownTicker = setInterval(async ()=>{
-        if (!curRoom) return;
-
-        if (curRoom.state==="preparing"){
-          const left = Math.ceil((curRoom.preStartUntilMs - Date.now())/1000);
-          if (left > 0){ showCountdownOverlay(left); }
-          else {
-            showCountdownOverlay("ゲームスタート！", { fontSize: 36 });
-            setTimeout(async ()=>{ hideCountdownOverlay(); if (seat==="p1"){ await maybeAdThenStart(); } }, 1200);
-          }
-          return;
-        }
-
-        if (curRoom.state!=="playing" || curRoom.revealRound !== curRoom.round){
-          hideCountdownOverlay(); return;
-        }
-        const remain = Math.max(0, Math.ceil((curRoom.revealUntilMs - Date.now())/1000));
-        if (remain > 0) showCountdownOverlay(remain); else hideCountdownOverlay();
-      }, 200);
-    }
-
-    if (seat === "p1" && !revealApplyPoller){
-      revealApplyPoller = setInterval(async ()=>{
-        if (!curRoom) return;
-
-        if (curRoom.state==="playing"){
-          const d = curRoom;
-          const both = !!d.players.p1.choice && !!d.players.p2.choice;
-          const revealing = (d.revealRound === d.round);
-          const already = !!(d.lastResult && d.lastResult._round === d.round);
-
-          if (both && revealing && !already && Date.now() >= d.revealUntilMs){
-            const result = judgeRound(d.players.p1, d.players.p2);
-            result._round = d.round;
-            await applyResult(d, result);
-            playResultSfx(result);
-            hideCountdownOverlay();
-            showResultOverlay(makeRoundSummary(result, seat), RESULT_SHOW_MS);
-            scheduleAutoNext(d, RESULT_SHOW_MS);
-          }
-        }
-
-        if (curRoom.state==="ended"){
-          const v = curRoom.rematchVotes || {p1:false,p2:false};
-          if (v.p1 && v.p2){ await startNewMatch(); }
-        }
-      }, 200);
-    }
-  }
-  function clearPollers(){
-    if (countdownTicker){ clearInterval(countdownTicker); countdownTicker=null; }
-    if (revealApplyPoller){ clearInterval(revealApplyPoller); revealApplyPoller=null; }
   }
 })();
