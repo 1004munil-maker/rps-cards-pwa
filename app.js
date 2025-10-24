@@ -1,10 +1,10 @@
 /* =========================================================
-   RPS Cards — app.js (FINAL FIXED-2)
-   - 両者Ready→3,2,1→自動開始（サーバ時刻基準）
-   - ランダム対戦：2回目以降も必ず動く（完全初期化/掃除）
-   - キャンセル時に待機票を確実削除
-   - 退室OK / スタンプOK
-   - Barrier条件バグ修正
+   RPS Cards — app.js (FINAL FIXED-4)
+   - スタンプ：自分側に正しく出る（ロビー/ゲーム両方）
+   - ランダム対戦：毎回40秒表示＆2回目以降も確実動作
+   - キャンセル時の掃除を強化（待機票/タイマー/UI）
+   - Ready→3,2,1→開始（サーバ時刻基準）維持
+   - 退室OK
    ========================================================= */
 
 /* ========== Firebase import 安全化 ========== */
@@ -140,7 +140,7 @@ async function ensureAnonAuth(app){
   const roomIdLabel= $("#roomIdLabel");
   const p1Label    = $("#p1Label");
   const p2Label    = $("#p2Label");
-  const btnStart   = $("#btnStart");   // Ready トグル
+  const btnStart   = $("#btnStart");
   const btnLeave   = $("#btnLeave");
 
   const game       = $("#game");
@@ -185,7 +185,6 @@ async function ensureAnonAuth(app){
   const BASIC_TOTAL = 15;
   const BASIC_MIN   = 2;
 
-  // ==== スタンプ ====
   const STAMP_LIST = ["😆","🥺","🤪","🫤","😊","😭","😓","💕"];
   let stampUI = null;
   let stampUIVisible = false;
@@ -217,14 +216,15 @@ async function ensureAnonAuth(app){
   let matchOverlayEl = null;
   let isMatching = false;
   let matchAbort = false;
-  let cleanupMatching = null;      // ← 待機票削除関数をここに保持
+  let cleanupMatching = null;
   let overallMatchCountdown = null;
   let matchSession = 0;
+  let currentTicketRef = null;  // ← 参照保持
+  let currentTicketUnsub = null;
 
   // 相手退室誤検知防止
   let prevOpUid = null;
 
-  // ← 未宣言で参照していたため例外が出ていた。初期化を追加。
   let lastRenderedRound = 0;
   let lastRoundStartMs  = 0;
 
@@ -294,13 +294,14 @@ async function ensureAnonAuth(app){
     if (btnRandom) btnRandom.disabled = !playerName?.value?.trim();
     stopOverallMatchCountdown();
     hideMatchOverlay();
+    if (currentTicketUnsub){ try{ currentTicketUnsub(); }catch(_){ } currentTicketUnsub=null; }
     cleanupMatching = null;
+    currentTicketRef = null;
   }
   async function cancelMatching(){
     matchAbort = true;
     matchSession++;
     try {
-      // 自分の待機票を確実に削除
       if (typeof cleanupMatching === "function") { await cleanupMatching(); }
     } catch(_) {} finally {
       resetMatchingUI();
@@ -379,13 +380,18 @@ async function ensureAnonAuth(app){
 
   // ===== ランダム対戦（40秒） =====
   if (btnRandom) btnRandom.onclick = async ()=>{
-    // 旧セッションを無効化＆UI/タイマー初期化
+    // 旧セッション無効化＆掃除
     matchSession++;
     const mySession = matchSession;
+
+    // 前回の待機票が残っていたら消す（権限NGは握りつぶし）
+    try{
+      if (typeof cleanupMatching === "function") await cleanupMatching();
+    }catch(_){}
     stopOverallMatchCountdown();
     hideMatchOverlay();
-    // 旧待機票の掃除が残っていたら実行
-    try{ if (typeof cleanupMatching === "function") await cleanupMatching(); }catch(_){}
+    if (currentTicketUnsub){ try{ currentTicketUnsub(); }catch(_){ } currentTicketUnsub=null; }
+    currentTicketRef = null;
 
     try{
       sfx.click();
@@ -397,11 +403,10 @@ async function ensureAnonAuth(app){
       matchAbort = false;
       btnRandom.disabled = true;
 
-      showMatchOverlay("待機中…", "");
-      await waitForConnected(db, 2000);
-
+      // 先にオーバーレイ＆40秒カウント開始（接続待ちより前に開始する）
       const OVERALL_SECONDS = 40;
       const overallDeadline = Date.now() + OVERALL_SECONDS*1000;
+      showMatchOverlay("待機中…", "");
       const updateOverall = ()=>{
         if (mySession !== matchSession) { stopOverallMatchCountdown(); return; }
         const left = Math.max(0, Math.ceil((overallDeadline - Date.now())/1000));
@@ -411,6 +416,10 @@ async function ensureAnonAuth(app){
       stopOverallMatchCountdown();
       overallMatchCountdown = setInterval(updateOverall, 250);
 
+      // 接続チェック（2秒まで待つ。結果に関わらず次へ）
+      await waitForConnected(db, 2000);
+
+      // 1) 既存待機者を奪取（10秒）
       const claimRes = await pollAndClaimExisting({ seconds:10, silent:true, session: mySession });
       if (mySession !== matchSession || matchAbort) { resetMatchingUI(); return; }
       if (claimRes.ok){
@@ -419,6 +428,7 @@ async function ensureAnonAuth(app){
         return;
       }
 
+      // 2) 自分の待機票で待つ（30秒）
       const waitRes = await enqueueAndWait({ seconds:30, silent:true, session: mySession });
       if (mySession !== matchSession || matchAbort) { resetMatchingUI(); return; }
 
@@ -508,7 +518,7 @@ async function ensureAnonAuth(app){
     game?.classList.add("hidden");
     if (roomIdLabel) roomIdLabel.textContent = roomId;
 
-    prevOpUid = null; // 新規入室時にリセット
+    prevOpUid = null;
 
     const roomRef = ref(db, `rooms/${roomId}`);
     if (unsubRoom) unsubRoom();
@@ -517,10 +527,7 @@ async function ensureAnonAuth(app){
       const d = snap.val();
       curRoom = d;
 
-      // スタンプ反映
       handleEmote(d?.emote);
-
-      // 相手退室検知
       detectOpponentLeft(d);
 
       try{
@@ -543,7 +550,6 @@ async function ensureAnonAuth(app){
     const bothReady = !!(d.players?.p1?.ready && d.players?.p2?.ready);
     if (!bothReady) return;
 
-    // 二重発火防止
     if (d.preStartAt && d.state === "preparing") return;
 
     await update(ref(db, `rooms/${roomId}`), {
@@ -587,6 +593,7 @@ async function ensureAnonAuth(app){
     let removed = false;
     try{
       myTicketRef = push(ref(db, "mm/queue"));
+      currentTicketRef = myTicketRef;
       await set(myTicketRef, {
         uid: authUid,
         name: (myName || "GUEST").slice(0,20),
@@ -611,13 +618,13 @@ async function ensureAnonAuth(app){
       const finish = async (res)=>{
         if (finished) return;
         finished = true;
-        if (unsub) unsub();
+        if (currentTicketUnsub){ try{ currentTicketUnsub(); }catch(_){ } currentTicketUnsub=null; }
         if (timeout) clearTimeout(timeout);
         cleanupMatching = null;
         resolve(await finishAndCleanup(res));
       };
 
-      const unsub = onValue(myTicketRef, async (snap)=>{
+      currentTicketUnsub = onValue(myTicketRef, async (snap)=>{
         if (finished) return;
         if (matchAbort || session !== matchSession){ finish({ ok:false, reason:"CANCELLED" }); return; }
         const v = snap.val();
@@ -627,8 +634,8 @@ async function ensureAnonAuth(app){
 
       const timeout = setTimeout(()=>{ finish({ ok:false, reason:"TIMEOUT" }); }, seconds*1000);
 
-      // キャンセル時に確実に消すためのハンドラを保存
-      cleanupMatching = async ()=>{ try{ unsub && unsub(); }catch(_){}
+      cleanupMatching = async ()=>{
+        try{ currentTicketUnsub && currentTicketUnsub(); }catch(_){}
         try{ clearTimeout(timeout); }catch(_){}
         await finishAndCleanup({ ok:false, reason:"CANCELLED" });
       };
@@ -647,7 +654,7 @@ async function ensureAnonAuth(app){
       const arr = [];
       list.forEach(snap=>{
         const v = snap.val(); const k = snap.key;
-        if (!v || v.uid === authUid) return;
+        if (!v || v.uid === authUid) return; // 自分の待機票はスキップ
         arr.push({ k, v });
       });
       arr.sort((a,b)=> (a.v.ts||0) - (b.v.ts||0));
@@ -786,7 +793,6 @@ async function ensureAnonAuth(app){
     if (roundNo) roundNo.textContent = d.round ?? 0;
     if (minRoundsEl) minRoundsEl.textContent = d.minRounds ?? MIN_ROUNDS;
 
-    // 盤面サイズラベル
     const b1 = document.getElementById('boardSizeLabel');
     const b2 = document.getElementById('boardSizeLabel2');
     if (b1) b1.textContent = d.boardSize ?? BOARD_SIZE;
@@ -797,15 +803,12 @@ async function ensureAnonAuth(app){
     const me = d.players[meSeat];
     const op = d.players[opSeat];
 
-    // 決闘ヘッダ名
     duelMeName?.replaceChildren(document.createTextNode(me?.name || "—"));
     duelOpName?.replaceChildren(document.createTextNode(op?.name || "—"));
 
-    // ロビー名
     if (p1Label) p1Label.textContent = d.players.p1?.name || "-";
     if (p2Label) p2Label.textContent = d.players.p2?.name || "-";
 
-    // Readyボタン
     if (btnStart){
       const myReady = !!me?.ready;
       btnStart.textContent = myReady ? "✅ Ready取り消し" : "▶ Ready";
@@ -850,7 +853,6 @@ async function ensureAnonAuth(app){
     if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8 || iSubmitted || endedThisRound || revealing || d.state!=="playing";
     if (btnPlay) btnPlay.disabled = !selectedCard || iSubmitted || endedThisRound || revealing || d.state!=="playing";
 
-    // 状態メッセ
     if (stateMsg){
       if (d.state === "ended"){
         const w = d.lastResult?.winner;
@@ -876,15 +878,12 @@ async function ensureAnonAuth(app){
       }
     }
 
-    // ロビー：両者Readyで p1 が preparing 開始
     if (d.state === "lobby" && seat==="p1" && d.players?.p1?.ready && d.players?.p2?.ready){
       if (!d.preStartAt){ startPreStartCountdown(); }
     }
 
-    // プレイ中のタイマー
     setupTimer(d.roundStartMs, d.round, me.choice, op.choice, d);
 
-    // 両提出でリビール
     if (bothSubmitted && seat==="p1" && !revealing && !endedThisRound && d.state==="playing"){
       update(ref(db, `rooms/${roomId}`), {
         revealRound: d.round,
@@ -901,7 +900,7 @@ async function ensureAnonAuth(app){
     if (!endedThisRound && !revealing && overlayShownRound !== d.round){ hideResultOverlay(); }
   }
 
-  /* [14.5] 相手退室の検知（遷移のみ） */
+  /* [14.5] 相手退室の検知 */
   function detectOpponentLeft(d){
     const meSeat = seat;
     const opSeat = seat==="p1" ? "p2" : "p1";
@@ -1076,7 +1075,7 @@ async function ensureAnonAuth(app){
     return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0} };
   }
 
-  /* [19] 判定（Barrier条件バグ修正済み） */
+  /* [19] 判定 */
   function judgeRound(p1, p2){
     const a = p1.choice, b = p2.choice;
 
@@ -1265,7 +1264,7 @@ async function ensureAnonAuth(app){
     if (resultOverlayTimerId) { clearTimeout(resultOverlayTimerId); resultOverlayTimerId = null; }
   }
 
-  /* === カウントオーバーレイ（数字64px／開始文字36px） === */
+  /* === カウントオーバーレイ === */
   function ensureCountdownOverlay(){
     if (countdownOverlayEl) return countdownOverlayEl;
     countdownOverlayEl = document.createElement("div");
@@ -1316,7 +1315,7 @@ async function ensureAnonAuth(app){
         try{
           if (!curRoom) return;
 
-          // preStart（ロビーの3,2,1） — サーバ時刻基準
+          // preStart（サーバ時刻基準）
           if (curRoom.state==="preparing"){
             const at = curRoom.preStartAt || 0;
             const dur = curRoom.preStartDurationMs || 3000;
@@ -1514,7 +1513,7 @@ async function ensureAnonAuth(app){
     return "—";
   }
 
-  /* ====== スタンプ：UI & DB同期 ====== */
+  /* ====== スタンプ：UI & DB同期（位置修正） ====== */
   function ensureStampButton(){
     if (btnStamp) return btnStamp;
     let el = document.getElementById('btnStamp');
@@ -1574,6 +1573,8 @@ async function ensureAnonAuth(app){
       });
     }catch(e){ console.warn('stamp failed', e); }
   }
+
+  // ★★★ ここを修正：p1/p2 → 自分/相手へ正しいマッピング ★★★
   function handleEmote(emote){
     if (!emote) return;
     const now = Date.now();
@@ -1586,27 +1587,39 @@ async function ensureAnonAuth(app){
       if (lastEmoteKey[k] === key) return;
       lastEmoteKey[k] = key;
 
-      const targetEl = pickEmoteAnchor(k);
+      const targetEl = pickEmoteAnchor(k); // ← seatと照合して自分側に出す
       if (!targetEl) return;
-      showEmojiBubble(targetEl, e.emoji, remain);
+      showEmojiBubble(targetEl, e.emoji, remain, (k===seat)); // 第4引数：自分かどうか
     });
   }
+
+  // seatKey("p1"/"p2") が「自分の座席 == seat」なら自分側アンカーを返す
   function pickEmoteAnchor(seatKey){
+    const isMine = (seatKey === seat);
     const gameVisible = !game?.classList.contains('hidden');
     if (gameVisible){
-      return document.querySelector(seatKey==='p1' ? chipMeSel : chipOpSel);
+      return document.querySelector(isMine ? chipMeSel : chipOpSel);
     }
-    return document.getElementById(seatKey==='p1' ? 'p1Label' : 'p2Label');
+    // ロビーでは p1Label/p2Label を自分/相手で切り替える
+    if (isMine){
+      return document.getElementById(seat==='p1' ? 'p1Label' : 'p2Label');
+    }else{
+      return document.getElementById(seat==='p1' ? 'p2Label' : 'p1Label');
+    }
   }
-  function showEmojiBubble(targetEl, emoji, duration=3000){
+
+  // 表示位置は要素の中央上に出す。自分/相手でわずかにずらして視認性UP
+  function showEmojiBubble(targetEl, emoji, duration=3000, isMine=false){
     if (!targetEl) return;
     const rect = targetEl.getBoundingClientRect();
     const bubble = document.createElement("div");
     bubble.className = 'emote-bubble';
+    const x = rect.left + rect.width/2 + (isMine ? -6 : 6);
+    const y = rect.top - 10;
     Object.assign(bubble.style, {
       position:'fixed',
-      left: (rect.left + rect.width/2) + 'px',
-      top:  (rect.top - 10) + 'px',
+      left: x + 'px',
+      top:  y + 'px',
       transform:'translate(-50%, -100%)',
       background:'#fff',
       borderRadius:'16px',
@@ -1631,9 +1644,7 @@ async function ensureAnonAuth(app){
     };
     setTimeout(kill, Math.max(300, duration));
 
-    const k = (targetEl.id==='p1Label'||targetEl.matches(chipMeSel)) ? 'p1' : 'p2';
-    if (emoteTimers[k]) clearTimeout(emoteTimers[k]);
-    emoteTimers[k] = setTimeout(()=>{}, duration);
+    const k = isMine ? 'p1p2any' : 'p1p2any'; // タイマースロットは不要なのでダミー
   }
 
   /* === 接続確認 === */
