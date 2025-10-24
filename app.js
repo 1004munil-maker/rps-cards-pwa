@@ -60,13 +60,13 @@ async function ensureFirebaseAPI(){
     ensure(){ if(!this.ctx){ const AC=window.AudioContext||window.webkitAudioContext; if(AC) this.ctx=new AC(); } if(this.ctx&&this.ctx.state==='suspended') this.ctx.resume(); }
     tone({freq=440,dur=0.08,type='sine',gain=0.06,attack=0.005,release=0.04}){
       if(!this.enabled) return; this.ensure(); if(!this.ctx) return;
-      const t0=this.ctx.currentTime, osc=this.ctx.createOscillator(), g=this.ctx.createGain();
+      const t0=this.ctx.currentTime; const osc=this.ctx.createOscillator(); const g=this.ctx.createGain();
       osc.type=type; osc.frequency.value=freq; g.gain.setValueAtTime(0,t0); g.gain.linearRampToValueAtTime(gain,t0+attack);
       g.gain.exponentialRampToValueAtTime(0.0001,t0+attack+dur+release); osc.connect(g).connect(this.ctx.destination);
       osc.start(t0); osc.stop(t0+attack+dur+release+0.01);
     }
     click(){ this.tone({freq:900,dur:0.03,type:'square',gain:0.04}); }
-    play(){ this.tone({freq:660,dur=0.06,type:'triangle',gain:0.05}); }
+    play(){ this.tone({freq:660,dur:0.06,type:'triangle',gain:0.05}); }  // ← 修正: dur:
     win(){ this.tone({freq:740,dur:0.09,type:'sine',gain:0.06}); setTimeout(()=>this.tone({freq:880,dur:0.09}),90); }
     lose(){ this.tone({freq:200,dur:0.12,type:'sawtooth',gain:0.05}); }
     swap(){ this.tone({freq:520,dur:0.06}); setTimeout(()=>this.tone({freq:420,dur:0.06}),70); }
@@ -113,7 +113,7 @@ async function ensureFirebaseAPI(){
   const roomIdLabel= $("#roomIdLabel");
   const p1Label    = $("#p1Label");
   const p2Label    = $("#p2Label");
-  const btnStart   = $("#btnStart"); // ← ロビーでは「準備OK/解除」ボタンとして使う
+  const btnStart   = $("#btnStart"); // 準備OK/解除
   const btnLeave   = $("#btnLeave");
 
   const game       = $("#game");
@@ -142,6 +142,7 @@ async function ensureFirebaseAPI(){
     if (btnJoin)   btnJoin.disabled   = !ok;
     if (btnRandom) btnRandom.disabled = !ok || Match.active;
   };
+  guardNameButtons();
   playerName?.addEventListener('input', guardNameButtons);
 
   /* [05] 定数 */
@@ -182,7 +183,7 @@ async function ensureFirebaseAPI(){
   const Match = {
     active:false, cancelled:false,
     ticketRef:null, onTicket:null,
-    timeoutId:null, tickId:null,
+    timeoutId:null, tickId:null, _onRef:null,
     reset: async function(){
       this.cancelled = false;
       if (this.timeoutId){ clearTimeout(this.timeoutId); this.timeoutId=null; }
@@ -241,7 +242,7 @@ async function ensureFirebaseAPI(){
   }
   function showMatchOverlay(msg, sub=""){ const el=ensureMatchOverlay(); const inner=el.querySelector("#overlayMatchInner"); setMatchOverlay(msg, sub); el.style.display="flex"; requestAnimationFrame(()=>{ inner.style.transform="scale(1)"; inner.style.opacity="1"; }); }
   function setMatchOverlay(msg, sub){ if (!matchOverlayEl) return; const m=matchOverlayEl.querySelector("#overlayMatchMsg"); const s=matchOverlayEl.querySelector("#overlayMatchSub"); if (msg!=null) m.textContent=msg; if (sub!=null) s.textContent=sub; }
-  function hideMatchOverlay(){ if (!matchOverlayEl) return; const inner=matchOverlayEl.querySelector("#overlayMatchInner"); inner.style.transform="scale(.94)"; inner.style.opacity="0"; setTimeout(()=>{ matchOverlayEl.style.display="none"; }, 180); }
+  function hideMatchOverlay(){ if (!matchOverlayEl) return; const inner=matchOverlayEl.querySelector("#overlayMatchInner"); inner.style.transform="scale(.94)"; inner.style.opacity="0"; setTimeout(()=>{ matchOverlayEl.style.display = "none"; }, 180); }
 
   /* [08] イベント紐づけ */
   if (btnCreate) btnCreate.onclick = async () => {
@@ -288,7 +289,7 @@ async function ensureFirebaseAPI(){
     sfx.click();
   };
 
-  // ← ロビーでは「準備OK/解除」トグル（両者がOKなら自動開始）
+  // 準備OK/解除（ロビー）
   if (btnStart) btnStart.onclick = async () => {
     sfx.click();
     if (!roomId) return;
@@ -318,16 +319,15 @@ async function ensureFirebaseAPI(){
       if (!name){ alert("名前を入力してね"); playerName.focus(); return; }
       myName = name;
 
-      // 念のため前回の残骸を掃除
       await Match.reset();
       Match.active = true;
       guardNameButtons();
 
       showMatchOverlay("相手を探しています…", "既存待機者を最大10秒検索");
       await waitForConnected(db, 2000);
-      // ① 既存待機者を 1秒ごとに10秒探す
+
       const claimRes = await pollAndClaimExisting({ seconds:10 });
-      if (Match.cancelled) return; // キャンセルされた
+      if (Match.cancelled) return;
       if (claimRes.ok){
         await Match.reset();
         roomId = claimRes.roomId;
@@ -339,7 +339,6 @@ async function ensureFirebaseAPI(){
         return;
       }
 
-      // ② 自分の待機票を作って 30秒待つ
       setMatchOverlay("待機列に入りました…", "誰かが来るのを最大30秒待ちます（×でキャンセル）");
       const waitRes = await enqueueAndWait({ seconds:30 });
       if (Match.cancelled) return;
@@ -443,26 +442,24 @@ async function ensureFirebaseAPI(){
       renderGame(d);
       ensurePollers();
 
-      // ★両者準備OKなら p1 が自動開始
+      // 両者準備OKなら p1 が自動開始
       if (seat === "p1" && d.state==="lobby"){
         const r1 = !!d.players?.p1?.ready;
         const r2 = !!d.players?.p2?.ready;
         const haveBoth = !!d.players?.p1?.id && !!d.players?.p2?.id;
         if (haveBoth && r1 && r2){
-          await startGame(); // startGame内でreadyをクリアする
+          await startGame();
         }
       }
     });
   }
 
   /* ========== ランダムマッチング内部 ========== */
-
   function isMissingIndexError(err){
     const s = String(err?.message || err || "");
     return /index\s*not\s*defined|\.indexOn/i.test(s);
   }
 
-  // 既存待機者を最長N秒、1秒間隔で奪取トライ（キャンセル可）
   async function pollAndClaimExisting({ seconds = 10 } = {}){
     const until = Date.now() + seconds*1000;
     while(Date.now() < until){
@@ -475,7 +472,6 @@ async function ensureFirebaseAPI(){
     return { ok:false, reason:"NO_EXISTING" };
   }
 
-  // 待機票を作って最長N秒待つ（キャンセル可）
   async function enqueueAndWait({ seconds = 30 } = {}){
     let myTicketRef = null;
     try{
@@ -497,7 +493,6 @@ async function ensureFirebaseAPI(){
     return await new Promise((resolve)=>{
       const deadline = Date.now() + seconds*1000;
       Match.tickId = setInterval(()=>{
-        if (Match.cancelled){ /* resolve は cancel() 側の reset で実質終了 */ }
         setMatchOverlay("待機中…", `残り ${Math.max(0,Math.ceil((deadline-Date.now())/1000))} 秒（×でキャンセル）`);
       }, 250);
 
@@ -510,7 +505,7 @@ async function ensureFirebaseAPI(){
 
       const onTicket = async (snap)=>{
         const v = snap.val();
-        if (!v) { // 誰かに消された
+        if (!v) {
           clearTimeout(Match.timeoutId); Match.timeoutId=null;
           if (Match.tickId){ clearInterval(Match.tickId); Match.tickId=null; }
           off(myTicketRef, 'value', onTicket);
@@ -531,13 +526,12 @@ async function ensureFirebaseAPI(){
     });
   }
 
-  // 1回分：既存待機者リストから最古(ts最小)を見つけ、トランザクションでclaimedByを自分に→部屋作成
   async function tryClaimOne(){
     try{
       const q = query(ref(db, 'mm/queue'), orderByChild('claimedBy'), equalTo(null), limitToFirst(25));
       const list = await get(q);
 
-      let candKey = null, candVal = null;
+      let candKey = null; let candVal = null;
       const arr = [];
       list.forEach(snap=>{
         const v = snap.val(); const k = snap.key;
@@ -575,7 +569,6 @@ async function ensureFirebaseAPI(){
 
     }catch(err){
       if (isMissingIndexError(err)){
-        // インデックス無しフォールバック
         try{
           const allSnap = await get(ref(db, 'mm/queue'));
           const all = allSnap.exists() ? allSnap.val() : {};
@@ -722,13 +715,12 @@ async function ensureFirebaseAPI(){
     p1Label && (p1Label.textContent = d.players.p1?.name || "-");
     p2Label && (p2Label.textContent = d.players.p2?.name || "-");
 
-    // ロビーのボタン表記を「準備OK/解除」に
     if (btnStart){
       if (d.state==="lobby"){
         const myReady = !!d.players?.[meSeat]?.ready;
         btnStart.textContent = myReady ? "準備解除" : "準備OK";
         btnStart.disabled = false;
-      }else{
+      } else {
         btnStart.textContent = "対戦中";
         btnStart.disabled = true;
       }
@@ -866,7 +858,7 @@ async function ensureFirebaseAPI(){
     if (!selectedCard) return;
 
     const meSnap = await get(ref(db, `rooms/${roomId}/players/${seat}`));
-    let me = meSnap.val();
+    const me = meSnap.val();
     if (!me) return;
     if (me.choice){
       roundLocked = true;
@@ -900,7 +892,7 @@ async function ensureFirebaseAPI(){
     const snap = await get(ref(db, `rooms/${roomId}`));
     if (!snap.exists()) return;
     const d = snap.val();
-    const p1 = d.players.p1, p2 = d.players.p2;
+    const p1 = d.players.p1; const p2 = d.players.p2;
     const both = !!p1.choice && !!p2.choice;
 
     if (both && seat === "p1" && d.revealRound !== d.round){
@@ -914,8 +906,8 @@ async function ensureFirebaseAPI(){
   /* [18] タイムアウト処理 */
   async function settleTimeout(roomData){
     const d = roomData ?? (await get(ref(db, `rooms/${roomId}`))).val();
-    const p1 = d.players.p1, p2 = d.players.p2;
-    const a = p1.choice, b = p2.choice;
+    const p1 = d.players.p1; const p2 = d.players.p2;
+    const a = p1.choice; const b = p2.choice;
     if (a && b) return;
 
     let result;
@@ -938,11 +930,11 @@ async function ensureFirebaseAPI(){
       return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?gain:0, p2: winnerSeat==="p2"?gain:0}, note:"時間切れ" };
     }
     if (card==="WIN"){
-      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1]?4:0, p2: winnerSeat==="p2"?4:0}, note:"時間切れ(必勝)" };
+      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?4:0, p2: winnerSeat==="p2"?4:0}, note:"時間切れ(必勝)" }; // ← 修正: "p1"?
     }
     if (card==="SWAP"){
       if (diff<8) return { type:"swap", winner:winnerSeat, swap:true, note:"時間切れ(位置交換)" };
-      else return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0}, note:"SWAP不可(差>=8)" };
+      return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0}, note:"SWAP不可(差>=8)" };
     }
     if (card==="BARRIER"){
       return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0}, note:"バリアは進まない" };
@@ -952,7 +944,7 @@ async function ensureFirebaseAPI(){
 
   /* [19] ルール＆SFX */
   function judgeRound(p1, p2){
-    const a = p1.choice, b = p2.choice;
+    const a = p1.choice; const b = p2.choice;
 
     if (a==="WIN" && b==="WIN") return { type:"win", winner:null, delta:{p1:0,p2:0}, note:"必勝同士" };
 
@@ -992,7 +984,6 @@ async function ensureFirebaseAPI(){
     if (r.type==="timeout"){
       const amIWinner = (r.winner === (seat==="p1"?"p1":"p2"));
       amIWinner ? sfx.win() : sfx.lose();
-      return;
     }
   }
 
@@ -1078,7 +1069,7 @@ async function ensureFirebaseAPI(){
     const idx1 = Math.min(size, Math.max(0,p1)) - 1;
     const idx2 = Math.min(size, Math.max(0,p2)) - 1;
 
-    let tm=null, to=null;
+    let tm=null; let to=null;
     if (idx1>=0){
       tm = document.createElement("div");
       tm.className = "token me";
@@ -1200,7 +1191,7 @@ async function ensureFirebaseAPI(){
   /* [22] ユーティリティ */
   function randomBasicHand(){
     let rest = BASIC_TOTAL - BASIC_MIN*3;
-    let g = BASIC_MIN, c = BASIC_MIN, p = BASIC_MIN;
+    let g = BASIC_MIN; let c = BASIC_MIN; let p = BASIC_MIN;
     const add = [0,0,0];
     for(let i=0;i<rest;i++){ add[Math.floor(Math.random()*3)]++; }
     g += add[0]; c += add[1]; p += add[2];
@@ -1263,7 +1254,6 @@ async function ensureFirebaseAPI(){
   function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
-  // === 結果要約 ===
   function makeRoundSummary(r, mySeat){
     const seatKey = mySeat || (seat==="p1"?"p1":"p2");
     if (r.swap) return "🔁 位置を交換！";
@@ -1293,7 +1283,7 @@ async function ensureFirebaseAPI(){
     return "—";
   }
 
-  // === ポーラー ===
+  /* === ポーラー === */
   function ensurePollers(){
     if (!countdownTicker){
       countdownTicker = setInterval(()=>{
@@ -1406,4 +1396,4 @@ async function ensureFirebaseAPI(){
   }
 
   function prettyResultTextForLabel(r, mySeat){ return prettyResult(r, mySeat); }
-})();
+})();  // ← 末尾に余計なテキストを付けないこと！
