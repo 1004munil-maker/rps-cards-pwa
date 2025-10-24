@@ -1,5 +1,9 @@
 /* =========================================================
-   RPS Cards — app.js（最終リリース / 40秒統一カウント & 安定化）
+   RPS Cards — app.js（最終リリース / 40秒統一 & 安定化）
+   修正タグ：
+   [Fix-1] 40秒の総合カウントダウンを常時表示（10s+30s を統合）
+   [Fix-2] 待機票の初回書込を最小項目に（ルールと整合）
+   [Fix-3] ラウンド切替時にタイマー/ロックを必ず初期化
    ========================================================= */
 
 /* ========== Firebase import 安全化 ========== */
@@ -206,7 +210,11 @@ async function ensureAnonAuth(app){
   let isMatching = false;
   let matchAbort = false;
   let cleanupMatching = null;
-  let overallMatchCountdown = null; // ★ 40秒統一タイマー
+  let overallMatchCountdown = null; // [Fix-1] 40秒の統一タイマー
+
+  // [Fix-3] ラウンド変化検知用
+  let lastRenderedRound = 0;
+  let lastRoundStartMs = 0;
 
   /* [07] 初期盤面 */
   makeBoard();
@@ -355,7 +363,7 @@ async function ensureAnonAuth(app){
       showMatchOverlay("待機中…", "");
       await waitForConnected(db, 2000);
 
-      // ★ 総40秒オーバーレイ更新
+      // [Fix-1] ★ 総40秒オーバーレイ更新（10秒＋30秒の内訳は非表示）
       const OVERALL_SECONDS = 40;
       const overallDeadline = Date.now() + OVERALL_SECONDS*1000;
       const updateOverall = ()=>{
@@ -366,7 +374,7 @@ async function ensureAnonAuth(app){
       stopOverallMatchCountdown();
       overallMatchCountdown = setInterval(updateOverall, 250);
 
-      // ① 既存待機者 10秒（静かな内部処理）
+      // ① 既存待機者 10秒（UIは上の総合のみ）
       const claimRes = await pollAndClaimExisting({ seconds:10, silent:true });
       if (matchAbort) { hideMatchOverlay(); return; }
       if (claimRes.ok){
@@ -375,7 +383,7 @@ async function ensureAnonAuth(app){
         return;
       }
 
-      // ② 自分の待機票で 30秒待機（静かな内部処理）
+      // ② 自分の待機票で 30秒待機（UIは上の総合のみ）
       const waitRes = await enqueueAndWait({ seconds:30, silent:true });
       if (matchAbort) { hideMatchOverlay(); return; }
 
@@ -495,7 +503,7 @@ async function ensureAnonAuth(app){
     enterLobby();
   }
 
-  // 既存待機者を最長N秒奪取（silent=trueならUIは触らない）
+  // 既存待機者を最長N秒奪取（silent=true なら UI 更新なし）
   async function pollAndClaimExisting({ seconds = 10, silent = false } = {}){
     const until = Date.now() + seconds*1000;
     while(Date.now() < until){
@@ -512,17 +520,18 @@ async function ensureAnonAuth(app){
     return { ok:false, reason:"NO_EXISTING" };
   }
 
-  // 待機票で最長N秒待つ（silent=trueならUIは触らない）
+  // 自分の待機票で待つ（silent=true なら UI 更新なし）
   async function enqueueAndWait({ seconds = 30, silent = false } = {}){
     let myTicketRef = null;
     try{
       myTicketRef = push(ref(db, "mm/queue"));
-  await set(myTicketRef, {
-      uid: authUid,
-      name: (myName || "GUEST").slice(0,20),
-      ts: serverTimestamp(),
-      status: "waiting"
-});
+      // [Fix-2] ルールと一致：初回は uid/name/ts/status のみ
+      await set(myTicketRef, {
+        uid: authUid,
+        name: (myName || "GUEST").slice(0,20),
+        ts: serverTimestamp(),
+        status: "waiting"
+      });
       try{ onDisconnect(myTicketRef).remove(); }catch(_){}
     }catch(err){
       return { ok:false, reason:"QUEUE_WRITE_DENIED: " + (err?.message || err) };
@@ -594,6 +603,7 @@ async function ensureAnonAuth(app){
         revealUntilMs: null,
         rematchVotes: { p1:false, p2:false },
         players: {
+          // 部屋作成者は p2（自分）でも OK（ルール側で許可済み）
           p1: { uid: candVal.uid, id: rid(6), name: candVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() },
           p2: { uid: authUid,     id: myId,   name: myName       || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() }
         }
@@ -730,7 +740,16 @@ async function ensureAnonAuth(app){
     const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
     const swapBtn = document.querySelector('.cardBtn[data-card="SWAP"]');
 
-    roundLocked = iSubmitted;
+    // [Fix-3] ラウンド/開始時刻が変わったら秒表示・ビープをリセット
+    if (d.round !== lastRenderedRound || d.roundStartMs !== lastRoundStartMs) {
+      lastRenderedRound = d.round;
+      lastRoundStartMs = d.roundStartMs || 0;
+      displayedSec = null;
+      lastBeepSec = null;
+    }
+
+    // [Fix-3] 未提出ならロックを解除（次Rで固まらないように）
+    if (!iSubmitted) roundLocked = false;
 
     cardBtns.forEach(b=>{
       const k = b.dataset.card;
