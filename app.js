@@ -1490,19 +1490,35 @@ async function ensureAnonAuth(app){
   }
 
   /* ====== スタンプ：UI & DB同期 ====== */
-  function ensureStampButton(){
-    if (btnStamp) return btnStamp;
-    const row = btnClear?.parentElement || btnPlay?.parentElement;
-    if (!row) return null;
-    btnStamp = document.createElement('button');
-    btnStamp.id = 'btnStamp';
-    btnStamp.className = 'ghost';
-    btnStamp.textContent = 'スタンプ';
-    btnStamp.style.marginLeft = '6px';
+// ====== スタンプ：UI & DB同期 ======
+let btnStamp = null;
+
+function ensureStampButton(){
+  if (btnStamp) return btnStamp;
+
+  // 既存の #btnStamp（HTMLにあるやつ）を優先して使う
+  const exist = document.getElementById('btnStamp');
+  if (exist){
+    btnStamp = exist;
+    // 同じリスナーは重複登録されない（同一関数参照）のでそのままでOK
     btnStamp.addEventListener('click', toggleStampUI);
-    row.appendChild(btnStamp);
     return btnStamp;
   }
+
+  // なければ最小限で生成（ID重複なし）
+  const row = btnClear?.parentElement || btnPlay?.parentElement;
+  if (!row) return null;
+  btnStamp = document.createElement('button');
+  btnStamp.id = 'btnStamp';
+  btnStamp.className = 'ghost';
+  btnStamp.textContent = 'スタンプ';
+  btnStamp.style.marginLeft = '6px';
+  btnStamp.addEventListener('click', toggleStampUI);
+  row.appendChild(btnStamp);
+  return btnStamp;
+}
+
+
   function ensureStampUI(){
     if (stampUI) return stampUI;
     stampUI = document.createElement('div');
@@ -1540,18 +1556,23 @@ async function ensureAnonAuth(app){
   }
 
   // 自分/相手に正しく出す
-  function pickEmoteAnchor(seatKey){
-    const amIMe = (seatKey === seat);
-    const gameVisible = !game?.classList.contains('hidden');
-    if (gameVisible){
-      return document.querySelector(amIMe ? chipMeSel : chipOpSel);
-    }
-    if (amIMe){
-      return document.getElementById(seat==='p1' ? 'p1Label' : 'p2Label');
-    }else{
-      return document.getElementById(seat==='p1' ? 'p2Label' : 'p1Label');
-    }
+// 自分/相手の「名前のところ」をアンカーにする
+function pickEmoteAnchor(seatKey){
+  const amIMe = (seatKey === seat);
+  const gameVisible = !game?.classList.contains('hidden');
+
+  if (gameVisible){
+    // ゲーム中：決闘ヘッダの名前を基準に（ここがユーザーの要望）
+    return document.getElementById(amIMe ? 'duelMeName' : 'duelOpName');
   }
+
+  // ロビー中：ラベル（p1Label/p2Label）を基準に
+  const myLabelId  = (seat === 'p1') ? 'p1Label' : 'p2Label';
+  const opLabelId  = (seat === 'p1') ? 'p2Label' : 'p1Label';
+  return document.getElementById(amIMe ? myLabelId : opLabelId);
+}
+
+
   function handleEmote(emote){
     if (!emote) return;
     const now = Date.now();
@@ -1569,34 +1590,41 @@ async function ensureAnonAuth(app){
       showEmojiBubble(targetEl, e.emoji, remain);
     });
   }
-  function showEmojiBubble(targetEl, emoji, duration=3000){
-    const rect = targetEl.getBoundingClientRect();
-    const bubble = document.createElement("div");
-    Object.assign(bubble.style, {
-      position:'fixed',
-      left: (rect.left + rect.width/2) + 'px',
-      top:  (rect.top - 10) + 'px',
-      transform:'translate(-50%, -100%)',
-      background:'#fff',
-      borderRadius:'16px',
-      padding:'6px 10px',
-      fontSize:'22px',
-      boxShadow:'0 6px 18px rgba(0,0,0,.2)',
-      zIndex:'11000',
-      transition:'transform .15s ease, opacity .15s ease',
-      opacity:'0'
-    });
-    bubble.textContent = emoji;
-    document.body.appendChild(bubble);
-    requestAnimationFrame(()=>{
-      bubble.style.opacity = '1';
-      bubble.style.transform = 'translate(-50%, -110%)';
-    });
-    const kill = ()=> {
-      bubble.style.opacity = '0';
-      bubble.style.transform = 'translate(-50%, -90%)';
-      setTimeout(()=> bubble.remove(), 160);
-    };
-    setTimeout(kill, Math.max(300, duration));
-  }
+function showEmojiBubble(targetEl, emoji, duration=3000){
+  if (!targetEl) return;
+  const rect = targetEl.getBoundingClientRect();
+
+  const bubble = document.createElement('div');
+  Object.assign(bubble.style, {
+    position:'fixed',
+    // 名前の中央に合わせる
+    left: (rect.left + rect.width/2) + 'px',
+    // 名前のすぐ「下」に出す
+    top:  (rect.bottom + 8) + 'px',
+    transform:'translate(-50%, 0)',
+    background:'#fff',
+    borderRadius:'16px',
+    padding:'6px 10px',
+    fontSize:'22px',
+    boxShadow:'0 6px 18px rgba(0,0,0,.2)',
+    zIndex:'11000',
+    transition:'transform .15s ease, opacity .15s ease',
+    opacity:'0'
+  });
+  bubble.textContent = emoji;
+  document.body.appendChild(bubble);
+
+  requestAnimationFrame(()=>{
+    bubble.style.opacity = '1';
+    bubble.style.transform = 'translate(-50%, 0)'; // 下方向固定
+  });
+
+  const kill = ()=> {
+    bubble.style.opacity = '0';
+    bubble.style.transform = 'translate(-50%, 6px)';
+    setTimeout(()=> bubble.remove(), 160);
+  };
+  setTimeout(kill, Math.max(300, duration));
+}
+
 })();
