@@ -22,7 +22,6 @@
 
   <!-- [H4] CSS -->
   <link rel="stylesheet" href="style.css" />
-
 </head>
 <body>
   <!-- [B1] 縦固定(9:16)の表示枠 -->
@@ -53,10 +52,9 @@
           <button id="btnJoin">入室</button>
         </div>
         <p class="help">友だちに部屋IDを共有してね！</p>
-
-    <div class="row">
-  <button id="btnRandom" class="primary">🎲 ランダム対戦 Beta</button>
-</div>
+        <div class="row">
+          <button id="btnRandom" class="primary">🎲 ランダム対戦 Beta</button>
+        </div>
       </section>
 
       <!-- [B5] ロビー -->
@@ -82,6 +80,19 @@
           <div>ラウンド <b id="roundNo">-</b> / <span id="minRounds">8</span>+</div>
           <div class="timer">⏱ <b id="timer">10</b>s</div>
           <div>差：<b id="diff">0</b>マス</div>
+        </div>
+
+        <!-- ★ 決闘ヘッダ（左右に名前、中央にVS） -->
+        <div class="duelHeader">
+          <div class="duelName duelName--me">
+            <span id="duelMeName">-</span>
+            <span class="speech" id="duelMeSpeech"></span>
+          </div>
+          <div class="duelVS">VS</div>
+          <div class="duelName duelName--op">
+            <span id="duelOpName">-</span>
+            <span class="speech" id="duelOpSpeech"></span>
+          </div>
         </div>
 
         <!-- ★ 10×2 グリッド -->
@@ -132,16 +143,13 @@
           <div class="row">
             <button id="btnPlay" class="primary" disabled>このカードを出す</button>
             <button id="btnClear" class="ghost">選択解除</button>
-
+            <!-- ★ スタンプボタン -->
+            <button id="btnStamp" class="ghost">スタンプ</button>
           </div>
           <p id="stateMsg" class="help">10秒以内に出してね（出さないと負け）</p>
         </section>
 
-        <section class="reveal card">
-          <div>あなた：<span id="meChoice">？</span></div>
-          <div>相手　：<span id="opChoice">？</span></div>
-          <div>結果　：<b id="resultText">-</b></div>
-        </section>
+        <!-- ★ revealカードは廃止 -->
 
         <div class="row">
           <button id="btnNext" class="hidden">次のラウンド</button>
@@ -164,6 +172,20 @@
         </script>
       </section>
     </main>
+  </div>
+
+  <!-- ★ スタンプ選択ポップアップ -->
+  <div id="stampPicker" class="stamp-picker hidden" role="dialog" aria-hidden="true">
+    <div class="stamp-grid">
+      <button class="stamp">😆</button>
+      <button class="stamp">🥺</button>
+      <button class="stamp">🤪</button>
+      <button class="stamp">🫤</button>
+      <button class="stamp">😊</button>
+      <button class="stamp">😭</button>
+      <button class="stamp">😓</button>
+      <button class="stamp">💕</button>
+    </div>
   </div>
 
   <!-- [B7] 横向き時のガード -->
@@ -212,8 +234,6 @@
     helpClose?.addEventListener('click', closeHelp);
     helpOk?.addEventListener('click', closeHelp);
     helpModal?.addEventListener('click', (e)=>{ if(e.target===helpModal) closeHelp(); });
-    // 初回はヘルプを軽く案内（必要ならコメントアウト）
-    // window.addEventListener('load', ()=> setTimeout(openHelp, 600));
   </script>
 
   <!-- [B10] Service Worker -->

@@ -366,3 +366,86 @@ ins.adsbygoogle{ display:block !important; width:100% !important; max-width:100%
 
 /* ============ 15. WebKit Scrollbar Hide ============ */
 ::-webkit-scrollbar{ display:none; }
+
+/* === Duel Header / Stamp (追加) === */
+:root{
+  --me-color: #ff99c8;   /* 自分カラー（既存に合わせたピンク系） */
+  --op-color: #9bf6ff;   /* 相手カラー（既存ボードの青系に寄せる） */
+}
+
+.duelHeader{
+  display:grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items:center;
+  gap:10px;
+  margin:10px 0 6px;
+}
+.duelVS{
+  font-weight:900;
+  letter-spacing:1px;
+  opacity:.75;
+}
+.duelName{
+  position:relative;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:8px 12px;
+  min-height:38px;
+  border-radius:999px;
+  font-weight:800;
+  box-shadow:0 4px 12px rgba(0,0,0,.08);
+  white-space:nowrap;
+}
+.duelName--me{ background:var(--me-color); color:#000; justify-self:start; }
+.duelName--op{ background:var(--op-color); color:#000; justify-self:end; }
+
+.duelName .speech{
+  position:absolute;
+  bottom:100%;
+  left:50%;
+  transform:translateX(-50%) translateY(-8px) scale(.96);
+  background:#fff;
+  border-radius:12px;
+  padding:6px 10px;
+  box-shadow:0 6px 18px rgba(0,0,0,.15);
+  font-size:20px;
+  opacity:0; pointer-events:none;
+  transition:opacity .15s ease, transform .15s ease;
+}
+.duelName .speech.show{
+  opacity:1;
+  transform:translateX(-50%) translateY(-12px) scale(1);
+}
+
+/* スタンプ選択 */
+.stamp-picker{
+  position:fixed;
+  right:12px; bottom:96px; /* 手札の上あたり */
+  background:#fff;
+  border-radius:14px;
+  box-shadow:0 12px 28px rgba(0,0,0,.22);
+  padding:10px;
+  z-index:9000;
+}
+.stamp-picker.hidden{ display:none; }
+.stamp-grid{
+  display:grid;
+  grid-template-columns: repeat(4, 44px);
+  gap:8px;
+}
+.stamp{
+  width:44px; height:44px;
+  border-radius:10px;
+  border:none;
+  font-size:24px;
+  background:#f6f7fb;
+  box-shadow:0 1px 0 rgba(0,0,0,.04) inset;
+  cursor:pointer;
+}
+.stamp:active{ transform:scale(.96); }
+
+@media (max-width: 360px){
+  .stamp-grid{ grid-template-columns: repeat(4, 40px); }
+  .stamp{ width:40px; height:40px; font-size:22px; }
+}
