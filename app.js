@@ -1,10 +1,10 @@
 /* =========================================================
-   RPS Cards — app.js (FINAL)
-   - Lobby Ready -> 3,2,1 -> 「ゲームスタート！」（小さめ）
-   - ランダムマッチ2回目以降のフラグ&UI復帰（resetMatchingUI）
-   - 部屋参加: p2をトランザクションでロック（同時参加レース対策）
-   - 相手退室の自動処理（通知して自動退出 / ルーム削除）
-   - スタンプ機能維持（相互表示・3秒吹き出し）
+   RPS Cards — app.js (CLEAN FINAL)
+   - ランダムマッチ2回目以降OK（UI完全復帰）
+   - 相手退室は「居た→いなくなった」時のみ発火（新規作成直後は出さない）
+   - 手動参加は players/p2 の最小更新のみ（ルール準拠）
+   - Ready→3,2,1→「ゲームスタート！」（36px）
+   - スタンプ維持
    ========================================================= */
 
 /* ========== Firebase import 安全化 ========== */
@@ -48,18 +48,7 @@ async function ensureAnonAuth(app){
   const auth = authMod.getAuth(app);
   try{ await authMod.setPersistence(auth, authMod.browserLocalPersistence); }catch(_){}
   if (!auth.currentUser){
-    try{
-      await authMod.signInAnonymously(auth);
-      console.log("Signed in anonymously:", auth.currentUser?.uid);
-    }catch(e){
-      console.error("Anonymous sign-in failed:", e);
-      if (String(e?.code||"").includes("operation-not-allowed")){
-        alert("匿名認証が未有効です。Firebase Console → Authentication → Anonymous を有効化してください。");
-      }else{
-        alert("サインインに失敗しました。ネットワークをご確認ください。");
-      }
-      throw e;
-    }
+    await authMod.signInAnonymously(auth);
   }
   return auth;
 }
@@ -78,7 +67,6 @@ async function ensureAnonAuth(app){
     lastTouchEnd = now;
   }, { passive: false, capture: true });
   document.addEventListener('wheel', e => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
-  (async () => { try { if (screen.orientation?.lock) await screen.orientation.lock('portrait'); } catch(_) {} })();
 
   /* [02] 効果音 */
   class SFX {
@@ -156,19 +144,14 @@ async function ensureAnonAuth(app){
   const mePosEl    = $("#mePos");
   const opPosEl    = $("#opPos");
   const stateMsg   = $("#stateMsg");
-  const meChoiceEl = $("#meChoice");
-  const opChoiceEl = $("#opChoice");
   const btnPlay    = $("#btnPlay");
   const btnClear   = $("#btnClear");
   const btnExit    = $("#btnExit");
   const cardBtns   = [...document.querySelectorAll(".cardBtn")];
   const cntG = $("#cntG"), cntC=$("#cntC"), cntP=$("#cntP"), cntWIN=$("#cntWIN"), cntSWAP=$("#cntSWAP"), cntBARRIER=$("#cntBARRIER");
 
-  // duel header names (HTML側にあれば使う)
   const duelMeName = $("#duelMeName");
   const duelOpName = $("#duelOpName");
-
-  // 吹き出しターゲット
   const chipMeSel = '.status .chip.me';
   const chipOpSel = '.status .chip.op';
 
@@ -222,29 +205,23 @@ async function ensureAnonAuth(app){
   let resultOverlayTimerId = null;
   let countdownOverlayEl = null;
 
-  // マッチング用
+  // マッチング
   let matchOverlayEl = null;
   let isMatching = false;
   let matchAbort = false;
   let cleanupMatching = null;
   let overallMatchCountdown = null;
-
-  // ラウンド変化検知
-  let lastRenderedRound = 0;
-  let lastRoundStartMs = 0;
-
-  // セッションID
   let matchSession = 0;
 
-  // 相手退室の一度きり通知
-  let opLeftHandled = false;
+  // 相手退室誤検知防止（前回の状態）
+  let prevOpUid = null;
 
   /* [07] 初期盤面 */
   makeBoard();
   ensureStampButton();
   ensureStampUI();
 
-  /* ========== マッチングオーバーレイ ========== */
+  /* ========== マッチングオーバーレイ & UI復帰 ========== */
   function ensureMatchOverlay(){
     if (matchOverlayEl) return matchOverlayEl;
     matchOverlayEl = document.createElement("div");
@@ -299,16 +276,14 @@ async function ensureAnonAuth(app){
     inner.style.opacity = "0";
     setTimeout(()=>{ matchOverlayEl.style.display = "none"; }, 180);
   }
-  // ★ マッチUI/フラグの原状復帰
-  function resetMatchingUI() {
+  function resetMatchingUI(){
     isMatching = false;
     matchAbort = false;
-    if (btnRandom) btnRandom.disabled = false;
+    if (btnRandom) btnRandom.disabled = !playerName?.value?.trim();
     stopOverallMatchCountdown();
     hideMatchOverlay();
     cleanupMatching = null;
   }
-
   async function cancelMatching(){
     matchAbort = true;
     matchSession++;
@@ -331,7 +306,6 @@ async function ensureAnonAuth(app){
       await createRoom(roomId, myName);
       enterLobby();
     } catch (e) {
-      console.error("createRoom failed:", e);
       alert("部屋作成に失敗しました：" + (e?.message || e));
     }
   };
@@ -390,7 +364,7 @@ async function ensureAnonAuth(app){
   };
   if (btnPlay) btnPlay.onclick = () => { sfx.play(); submitCard(); };
 
-  // ===== ランダム対戦（総40秒カウント） =====
+  // ===== ランダム対戦（40秒） =====
   if (btnRandom) btnRandom.onclick = async ()=>{
     if (isMatching) return;
     const mySession = ++matchSession;
@@ -403,7 +377,7 @@ async function ensureAnonAuth(app){
 
       isMatching = true;
       matchAbort = false;
-      if (btnRandom) btnRandom.disabled = true;
+      btnRandom.disabled = true;
 
       showMatchOverlay("待機中…", "");
       await waitForConnected(db, 2000);
@@ -450,10 +424,10 @@ async function ensureAnonAuth(app){
     }
   };
 
-  /* [09] 対戦前の広告（ネイティブ時のみ） — Readyカウントダウン後に startGame を呼ぶ */
+  /* [09] 対戦前の広告（ネイティブ時のみ） */
   async function maybeAdThenStart(){
-    const showAd = Math.random() < 0.5;
     const isNative = !!window.Capacitor?.isNativePlatform;
+    const showAd = Math.random() < 0.5;
     const AdMob = window.Capacitor?.Plugins?.AdMob;
     if (isNative && showAd && AdMob){
       try {
@@ -464,21 +438,17 @@ async function ensureAnonAuth(app){
           : "ca-app-pub-3940256099942544/5354046379";
         await AdMob.prepareRewardedInterstitial({ adId });
         await AdMob.showRewardedInterstitial();
-      } catch (e) {
-        console.warn("Ad error, start anyway:", e);
-      }
-      await startGame();
-      return;
+      } catch (_) {}
     }
     await startGame();
   }
 
-  /* [10] ルーム作成/参加（uid保存 + ready=false） */
+  /* [10] ルーム作成（ready=false 初期化） */
   async function createRoom(id, name){
     await set(ref(db, `rooms/${id}`), {
       createdAt: serverTimestamp(),
-      state: "lobby",               // ← ロビー待機（自動開始しない）
-      preStartUntilMs: null,        // ← 両者Ready後の3,2,1用
+      state: "lobby",
+      preStartUntilMs: null,
       round: 0,
       minRounds: MIN_ROUNDS,
       boardSize: BOARD_SIZE,
@@ -494,7 +464,7 @@ async function ensureAnonAuth(app){
     });
   }
 
-  // ★ 同時参加レース対策（p2 をトランザクションでロック）
+  /* [10.5] 手動参加（最小更新：players/p2 のみ） */
   async function joinRoom(id, name){
     name = (name || "").trim().slice(0,20);
     if (!name) return { ok:false, reason:"NO_NAME" };
@@ -505,12 +475,7 @@ async function ensureAnonAuth(app){
     const d = snap.val();
     if (d.players?.p2?.uid) return { ok:false, reason:"FULL" };
 
-    const uidRef = ref(db, `rooms/${id}/players/p2/uid`);
-    const tx = await runTransaction(uidRef, cur => (cur==null ? authUid : cur));
-    if (!(tx.committed && tx.snapshot?.val() === authUid)){
-      return { ok:false, reason:"FULL" };
-    }
-
+    // ルールに合わせ、必要最小限だけ更新
     await update(ref(db, `rooms/${id}/players/p2`), {
       uid: authUid, id: myId, name, pos: 0, choice: null, hand: randomHand(), joinedAt: serverTimestamp(), ready: false
     });
@@ -525,46 +490,28 @@ async function ensureAnonAuth(app){
     game?.classList.add("hidden");
     if (roomIdLabel) roomIdLabel.textContent = roomId;
 
-    opLeftHandled = false;
+    prevOpUid = null; // 新規入室時にリセット
 
     const roomRef = ref(db, `rooms/${roomId}`);
     if (unsubRoom) unsubRoom();
-    unsubRoom = onValue(roomRef, async (snap)=>{
+    unsubRoom = onValue(roomRef, (snap)=>{
       if (!snap.exists()) return;
       const d = snap.val();
       curRoom = d;
+
+      // スタンプ反映
+      handleEmote(d?.emote);
+
+      // 相手退室検知（前回:在席 → 今回:不在 のときだけ）
+      detectOpponentLeft(d);
+
       renderGame(d);
       ensurePollers();
-      // 相手退室の自動処理
-      handleOpponentLeave(d).catch(()=>{});
     });
   }
 
-  /* 相手退室の自動処理 */
-  async function handleOpponentLeave(d){
-    if (!d) return;
-    const meSeat = seat;
-    const opSeat = seat==="p1" ? "p2" : "p1";
-    const meUid = d.players?.[meSeat]?.uid;
-    const opUid = d.players?.[opSeat]?.uid;
-
-    // 自分が居て、相手が消えた、かつロビー or プレイ中のみ
-    if (!opLeftHandled && meUid && !opUid && (d.state==="lobby" || d.state==="playing")){
-      opLeftHandled = true;
-      alert("相手が退室しました。");
-      try{
-        if (meSeat === "p1"){
-          await remove(ref(db, `rooms/${roomId}`)); // ホストは部屋ごと削除
-        }else{
-          await leaveRoom(); // ゲストは通常退出
-        }
-      }catch(_){}
-    }
-  }
-
-  /* ======== Lobby: 両者READY→3,2,1→ゲームスタート ======== */
+  /* ======== Ready→3,2,1→開始 ======== */
   async function startPreStartCountdown(){
-    // p1だけがセット（冪等）
     if (seat !== "p1") return;
     const snap = await get(ref(db, `rooms/${roomId}`));
     if (!snap.exists()) return;
@@ -576,7 +523,7 @@ async function ensureAnonAuth(app){
 
     await update(ref(db, `rooms/${roomId}`), {
       state: "preparing",
-      preStartUntilMs: Date.now() + 3000 // 3秒で 3,2,1
+      preStartUntilMs: Date.now() + 3000
     });
   }
 
@@ -591,7 +538,7 @@ async function ensureAnonAuth(app){
     enterLobby();
   }
 
-  // 既存待機者を最長N秒奪取
+  // 既存待機者を奪取
   async function pollAndClaimExisting({ seconds = 10, silent = false, session } = {}){
     const until = Date.now() + seconds*1000;
     while(Date.now() < until){
@@ -675,9 +622,9 @@ async function ensureAnonAuth(app){
       if (arr.length){ candKey = arr[0].k; candVal = arr[0].v; }
       if (!candKey) return { ok:false, reason:"EMPTY" };
 
+      // ルールに沿った claimedBy のトランザクション
       const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
       const tx = await runTransaction(claimRef, cur => (cur===null ? authUid : cur));
-      if (matchAbort || session !== matchSession) return { ok:false, reason:"CANCELLED" };
       if (!(tx.committed && tx.snapshot.val() === authUid)) return { ok:false, reason:"LOST_RACE" };
 
       const stillThere = await get(ref(db, `mm/queue/${candKey}`));
@@ -709,17 +656,15 @@ async function ensureAnonAuth(app){
     }
   }
 
-  /* [12] ゲーム開始（preparing → playing に遷移） */
+  /* [12] ゲーム開始（preparing → playing） */
   async function startGame(){
     const snap = await get(ref(db, `rooms/${roomId}`));
     if (!snap.exists()) { alert("部屋が見つかりません"); return; }
     const d = snap.val();
-
     if (seat !== "p1") { alert("ホストのみ開始できます"); return; }
     const hasP1 = !!d?.players?.p1?.uid;
     const hasP2 = !!d?.players?.p2?.uid;
     if (!(hasP1 && hasP2)) { alert("2人そろってから開始できます"); return; }
-    // preparing または lobby からのみ
     if (d.state === "playing") return;
 
     await update(ref(db, `rooms/${roomId}`), {
@@ -745,7 +690,6 @@ async function ensureAnonAuth(app){
     try {
       if (btnLeave) btnLeave.disabled = true;
       if (btnExit)  btnExit.disabled  = true;
-
       if (!roomId) { location.reload(); return; }
 
       const snap = await get(ref(db, `rooms/${roomId}`));
@@ -771,19 +715,18 @@ async function ensureAnonAuth(app){
         updates[`${base}/joinedAt`] = null;
         updates[`${base}/ready`]    = false;
 
-        if (d.state === "playing" || d.state === "preparing") {
-          updates[`rooms/${roomId}/state`]         = "lobby";
-          updates[`rooms/${roomId}/round`]         = 0;
-          updates[`rooms/${roomId}/roundStartMs`]  = null;
-          updates[`rooms/${roomId}/lastResult`]    = null;
-          updates[`rooms/${roomId}/revealRound`]   = null;
-          updates[`rooms/${roomId}/revealUntilMs`] = null;
-          updates[`rooms/${roomId}/preStartUntilMs`] = null;
+        if (d.state !== "lobby") {
+          updates[`rooms/${roomId}/state`]            = "lobby";
+          updates[`rooms/${roomId}/round`]            = 0;
+          updates[`rooms/${roomId}/roundStartMs`]     = null;
+          updates[`rooms/${roomId}/lastResult`]       = null;
+          updates[`rooms/${roomId}/revealRound`]      = null;
+          updates[`rooms/${roomId}/revealUntilMs`]    = null;
+          updates[`rooms/${roomId}/preStartUntilMs`]  = null;
         }
         await update(ref(db), updates);
       }
     } catch (err) {
-      console.error("leaveRoom error:", err);
       alert("退出に失敗しました。ネットワークを確認してもう一度お試しください。");
     } finally {
       if (unsubRoom) unsubRoom();
@@ -794,7 +737,7 @@ async function ensureAnonAuth(app){
 
   /* [14] レンダリング */
   function renderGame(d){
-    // ビュー切り替え
+    // ビュー切替
     if (d.state === "playing"){
       lobby?.classList.add("hidden");
       game?.classList.remove("hidden");
@@ -812,19 +755,19 @@ async function ensureAnonAuth(app){
     const me = d.players[meSeat];
     const op = d.players[opSeat];
 
-    // ★ 決闘ヘッダの名前（存在すれば）を更新
+    // 決闘ヘッダ名
     if (duelMeName) duelMeName.replaceChildren(document.createTextNode(me?.name || "—"));
     if (duelOpName) duelOpName.replaceChildren(document.createTextNode(op?.name || "—"));
 
-    // ロビーのピル表示
+    // ロビー名
     if (p1Label) p1Label.textContent = d.players.p1?.name || "-";
     if (p2Label) p2Label.textContent = d.players.p2?.name || "-";
 
-    // Readyボタンの表示
+    // Readyボタン
     if (btnStart){
       const myReady = !!me?.ready;
       btnStart.textContent = myReady ? "✅ Ready取り消し" : "▶ Ready";
-      btnStart.disabled = !me?.uid; // 自分がいない状況は押させない
+      btnStart.disabled = !me?.uid;
     }
 
     const iSubmitted     = !!me.choice;
@@ -843,23 +786,17 @@ async function ensureAnonAuth(app){
       (seat==="p1"?d.players.p2.pos:d.players.p1.pos)
     );
 
-    if (meChoiceEl) meChoiceEl.textContent = toFace(me.choice) || "？";
-    if (opChoiceEl) opChoiceEl.textContent = opSubmitted ? "⏳" : "？";
-
     const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
     const swapBtn = document.querySelector('.cardBtn[data-card="SWAP"]');
 
-    // ラウンド/開始時刻が変わったら秒表示・ビープをリセット
     if (d.round !== lastRenderedRound || d.roundStartMs !== lastRoundStartMs) {
       lastRenderedRound = d.round;
       lastRoundStartMs = d.roundStartMs || 0;
-      displayedSec = null;
-      lastBeepSec = null;
+      displayedSec = null; lastBeepSec = null;
     }
 
     if (!iSubmitted) roundLocked = false;
 
-    // 手札の有効/無効
     cardBtns.forEach(b=>{
       const k = b.dataset.card;
       const left = me.hand[k]||0;
@@ -871,7 +808,7 @@ async function ensureAnonAuth(app){
     if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8 || iSubmitted || endedThisRound || revealing || d.state!=="playing";
     if (btnPlay) btnPlay.disabled = !selectedCard || iSubmitted || endedThisRound || revealing || d.state!=="playing";
 
-    // 状態メッセージ
+    // 状態メッセ
     if (stateMsg){
       if (d.state === "ended"){
         const w = d.lastResult?.winner;
@@ -895,18 +832,15 @@ async function ensureAnonAuth(app){
       }
     }
 
-    // ロビー：両者Readyなら p1 がpreStartセット
+    // ロビー：両者Readyで p1 が preparing 開始
     if (d.state === "lobby" && seat==="p1" && d.players?.p1?.ready && d.players?.p2?.ready){
-      // 既に preparing でなければ発火
-      if (!d.preStartUntilMs){
-        startPreStartCountdown();
-      }
+      if (!d.preStartUntilMs){ startPreStartCountdown(); }
     }
 
     // プレイ中のタイマー
     setupTimer(d.roundStartMs, d.round, me.choice, op.choice, d);
 
-    // Reveal到達で判定
+    // 両提出でリビール
     if (bothSubmitted && seat==="p1" && !revealing && !endedThisRound && d.state==="playing"){
       update(ref(db, `rooms/${roomId}`), {
         revealRound: d.round,
@@ -920,8 +854,32 @@ async function ensureAnonAuth(app){
     }
 
     if (d.state === "ended"){ showRematchOverlay(d); } else { hideRematchOverlay(); }
-
     if (!endedThisRound && !revealing && overlayShownRound !== d.round){ hideResultOverlay(); }
+  }
+
+  /* [14.5] 相手退室の検知（遷移のみ） */
+  function detectOpponentLeft(d){
+    const meSeat = seat;
+    const opSeat = seat==="p1" ? "p2" : "p1";
+    const opUid = d.players?.[opSeat]?.uid || null;
+
+    // 初回は基準だけ更新（誤検知防止）
+    if (prevOpUid === null){
+      prevOpUid = opUid;
+      return;
+    }
+    // 在席→不在に変わった時だけ通知・処理
+    if (prevOpUid && !opUid){
+      prevOpUid = opUid;
+      alert("相手が退室しました。");
+      if (meSeat === "p1"){
+        remove(ref(db, `rooms/${roomId}`)).catch(()=>{});
+      }else{
+        leaveRoom();
+      }
+      return;
+    }
+    prevOpUid = opUid;
   }
 
   /* [15] 10秒タイマー */
@@ -1063,18 +1021,16 @@ async function ensureAnonAuth(app){
     const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
     if (card==="G"||card==="C"||card==="P"){
       const gain = (card==="G"?3:card==="C"?4:5);
-      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?gain:0, p2: winnerSeat==="p2"?gain:0}, note:"時間切れ" };
+      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?gain:0, p2: winnerSeat==="p2"?gain:0} };
     }
     if (card==="WIN"){
-      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?4:0, p2: winnerSeat==="p2"?4:0}, note:"時間切れ(必勝)" };
+      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?4:0, p2: winnerSeat==="p2"?4:0} };
     }
     if (card==="SWAP"){
-      if (diff<8) return { type:"swap", winner:winnerSeat, swap:true, note:"時間切れ(位置交換)" };
-      else return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0}, note:"SWAP不可(差>=8)" };
+      if (diff<8) return { type:"swap", winner:winnerSeat, swap:true };
+      else return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0} };
     }
-    if (card==="BARRIER"){
-      return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0}, note:"バリアは進まない" };
-    }
+    if (card==="BARRIER"){ return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0} }; }
     return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0} };
   }
 
@@ -1082,13 +1038,13 @@ async function ensureAnonAuth(app){
   function judgeRound(p1, p2){
     const a = p1.choice, b = p2.choice;
 
-    if (a==="WIN" && b==="WIN") return { type:"win", winner:null, delta:{p1:0,p2:0}, note:"必勝同士" };
+    if (a==="WIN" && b==="WIN") return { type:"win", winner:null, delta:{p1:0,p2:0} };
 
     if (a==="BARRIER" && (b==="WIN"||b==="SWAP")) return { type:"barrier", winner:"p1", delta:{p1:0,p2:0}, barrier:true };
     if (b==="BARRIER" && (a==="WIN"||a==="SWAP")) return { type:"barrier", winner:"p2", delta:{p1:0,p2:0}, barrier:true };
 
-    if (a==="BARRIER" && (b==="G"||b==="C"||b==="P")) return { type:"barrier-penalty", winner:"p2", delta:{p1:-1,p2:0} };
-    if (b==="BARRIER" && (a==="G"||a==="C"||a==="P")) return { type:"barrier-penalty", winner:"p1", delta:{p1:0,p2:-1} };
+    if (a==="BARRIER" && (b==="G"||"C"||"P")) return { type:"barrier-penalty", winner:"p2", delta:{p1:-1,p2:0} };
+    if (b==="BARRIER" && (a==="G"||"C"||"P")) return { type:"barrier-penalty", winner:"p1", delta:{p1:0,p2:-1} };
 
     if (a==="BARRIER" && b==="BARRIER") return { type:"tie", winner:null, delta:{p1:0,p2:0} };
 
@@ -1097,9 +1053,10 @@ async function ensureAnonAuth(app){
 
     if (a==="SWAP" && b!=="BARRIER"){ return { type:"swap", winner:"p1", swap:true }; }
     if (b==="SWAP" && a!=="BARRIER"){ return { type:"swap", winner:"p2", swap:true }; }
-    if (a==="SWAP" && b==="SWAP") return { type:"tie", winner:null, delta:{p1:0,p2:0}, note:"ダブルSWAPは相殺" };
+    if (a==="SWAP" && b==="SWAP") return { type:"tie", winner:null, delta:{p1:0,p2:0} };
 
-    if (isBasic(a) && isBasic(b)){
+    const isB = x => x==="G"||x==="C"||x==="P";
+    if (isB(a) && isB(b)){
       if (a===b) return { type:"tie", winner:null, delta:{p1:0,p2:0} };
       const aWin = (a==="G"&&b==="C")||(a==="C"&&b==="P")||(a==="P"&&b==="G");
       if (aWin){ return { type:"rps", winner:"p1", delta:{p1: gain(a), p2:0} }; }
@@ -1181,7 +1138,6 @@ async function ensureAnonAuth(app){
         "players/p2/choice": null
       });
       roundLocked = false;
-      selectedCard = null;
       hideResultOverlay();
     }, waitMs);
   }
@@ -1267,7 +1223,7 @@ async function ensureAnonAuth(app){
     if (resultOverlayTimerId) { clearTimeout(resultOverlayTimerId); resultOverlayTimerId = null; }
   }
 
-  /* === カウントダウン/開始オーバーレイ（数字は64px、開始文字は36px） === */
+  /* === カウントオーバーレイ（数字64px／開始文字36px） === */
   function ensureCountdownOverlay(){
     if (countdownOverlayEl) return countdownOverlayEl;
     countdownOverlayEl = document.createElement("div");
@@ -1291,10 +1247,7 @@ async function ensureAnonAuth(app){
   function showCountdownOverlay(textOrNumber, opts={}){
     const el = ensureCountdownOverlay();
     const inner = el.querySelector("#overlayCountdownInner");
-    // フォントサイズ指定（数字=64px、開始文字=36pxなど）
-    const fs = opts.fontSize != null ? `${opts.fontSize}px` : (typeof textOrNumber === "number" ? "64px" : "64px");
-    inner.style.fontSize = fs;
-
+    inner.style.fontSize = (opts.fontSize!=null) ? `${opts.fontSize}px` : (typeof textOrNumber==="number" ? "64px" : "64px");
     inner.textContent = `${textOrNumber}`;
     if (el.style.display!=="flex"){
       el.style.display = "flex";
@@ -1320,25 +1273,22 @@ async function ensureAnonAuth(app){
       countdownTicker = setInterval(async ()=>{
         if (!curRoom) return;
 
-        // 1) preStart（ロビーの3,2,1）
+        // preStart（ロビーの3,2,1）
         if (curRoom.state==="preparing"){
           const left = Math.ceil((curRoom.preStartUntilMs - Date.now())/1000);
           if (left > 0){
             showCountdownOverlay(left);
           }else{
-            // 3,2,1 終了 → 「ゲームスタート！」を小さめ表示 → p1 が開始
             showCountdownOverlay("ゲームスタート！", { fontSize: 36 });
             setTimeout(async ()=>{
               hideCountdownOverlay();
-              if (seat==="p1"){
-                await maybeAdThenStart();
-              }
+              if (seat==="p1"){ await maybeAdThenStart(); }
             }, 1200);
           }
           return;
         }
 
-        // 2) reveal カウント
+        // reveal中
         if (curRoom.state!=="playing" || curRoom.revealRound !== curRoom.round){
           hideCountdownOverlay();
           return;
@@ -1353,7 +1303,6 @@ async function ensureAnonAuth(app){
       revealApplyPoller = setInterval(async ()=>{
         if (!curRoom) return;
 
-        // reveal 終了 → 結果適用
         if (curRoom.state==="playing"){
           const d = curRoom;
           const both = !!d.players.p1.choice && !!d.players.p2.choice;
@@ -1371,7 +1320,6 @@ async function ensureAnonAuth(app){
           }
         }
 
-        // 再戦（両者合意）
         if (curRoom.state==="ended"){
           const v = curRoom.rematchVotes || {p1:false,p2:false};
           if (v.p1 && v.p2){ await startNewMatch(); }
@@ -1395,10 +1343,8 @@ async function ensureAnonAuth(app){
         background:"#fff", borderRadius:"14px", padding:"16px 18px", zIndex:"10000",
         boxShadow:"0 8px 24px rgba(0,0,0,.25)", minWidth:"260px", textAlign:"center"
       });
-      const h = document.createElement("div");
-      h.id="rematchTitle"; h.style.fontWeight="700"; h.style.fontSize="18px"; h.style.marginBottom="12px";
-      const p = document.createElement("div");
-      p.id="rematchStatus"; p.style.margin="8px 0 12px"; p.style.fontSize="13px"; p.style.color="#666";
+      const h = document.createElement("div"); h.id="rematchTitle"; h.style.fontWeight="700"; h.style.fontSize="18px"; h.style.marginBottom="12px";
+      const p = document.createElement("div"); p.id="rematchStatus"; p.style.margin="8px 0 12px"; p.style.fontSize="13px"; p.style.color="#666";
       const row = document.createElement("div"); row.style.display="flex"; row.style.gap="8px"; row.style.justifyContent="center";
       const again = document.createElement("button"); again.textContent = "もう一回";
       again.style.padding="10px 14px"; again.style.borderRadius="8px"; again.style.border="none"; again.style.background="#4caf50"; again.style.color="#fff"; again.style.fontWeight="700";
@@ -1447,7 +1393,6 @@ async function ensureAnonAuth(app){
       "players/p2/ready": false
     });
     roundLocked = false;
-    selectedCard = null;
     hideResultOverlay();
   }
 
@@ -1480,39 +1425,8 @@ async function ensureAnonAuth(app){
     if (cntSWAP) cntSWAP.textContent = `×${h.SWAP||0}`;
     if (cntBARRIER) cntBARRIER.textContent = `×${h.BARRIER||0}`;
   }
-  function isBasic(x){ return x==="G"||x==="C"||x==="P"; }
-  function gain(x){ return x==="G"?3:x==="C"?4:5; }
+  function gain(x){ return x==="G"?3:x==="C"?4:x==="P"?5:0; }
   function toFace(x){ return x==="G"?"✊":x==="C"?"✌️":x==="P"?"🫲":x==="WIN"?"👑":x==="SWAP"?"🔁":x==="BARRIER"?"🛡️":null; }
-  function prettyResult(r, seatKey){
-    switch(r.type){
-      case "rps": {
-        const myDelta = r.delta?.[seatKey] ?? 0;
-        const opDelta = r.delta?.[seatKey==="p1"?"p2":"p1"] ?? 0;
-        if (myDelta>0) return `あなたの勝ち！ +${myDelta} マス`;
-        if (opDelta>0) return `相手の勝ち… 相手が +${opDelta} マス`;
-        return "あいこ";
-      }
-      case "win": {
-        if (r.winner===seatKey) return "あなたの必勝！ +4";
-        if (r.winner) return "相手の必勝！ +4";
-        return "必勝同士";
-      }
-      case "swap": return "位置を交換！";
-      case "barrier": return (r.winner===seatKey) ? "あなたのバリアが防いだ" : "相手のバリアが防いだ";
-      case "barrier-penalty": {
-        const myDelta = r.delta?.[seatKey] ?? 0;
-        return myDelta<0 ? "バリアのペナルティ：あなたが -1" : "バリアのペナルティ：相手が -1";
-      }
-      case "timeout": {
-        if (r.winner===seatKey) return "相手の時間切れであなたの勝ち";
-        if (r.winner) return "あなたの時間切れ…相手の勝ち";
-        return "時間切れ";
-      }
-      case "timeout-tie": return "両者時間切れ";
-      case "tie": return "引き分け";
-      default: return "-";
-    }
-  }
   function clampN(x,n){ return Math.max(0, Math.min(n, x)); }
   function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
@@ -1546,23 +1460,6 @@ async function ensureAnonAuth(app){
     return "—";
   }
 
-  function prettyResultTextForLabel(r, mySeat){ return prettyResult(r, mySeat); }
-
-  /* === 接続確認 === */
-  function waitForConnected(db, timeoutMs = 10000){
-    return new Promise(resolve=>{
-      const connectedRef = ref(db, ".info/connected");
-      let settled = false;
-      const to = setTimeout(()=>{
-        if (!settled){ settled = true; unsub?.(); resolve(false); }
-      }, timeoutMs);
-      const unsub = onValue(connectedRef, snap=>{
-        const v = !!snap.val();
-        if (v && !settled){ settled = true; clearTimeout(to); unsub?.(); resolve(true); }
-      });
-    });
-  }
-
   /* ====== スタンプ：UI & DB同期 ====== */
   function ensureStampButton(){
     if (btnStamp) return btnStamp;
@@ -1577,7 +1474,6 @@ async function ensureAnonAuth(app){
     row.appendChild(btnStamp);
     return btnStamp;
   }
-
   function ensureStampUI(){
     if (stampUI) return stampUI;
     stampUI = document.createElement('div');
@@ -1587,15 +1483,10 @@ async function ensureAnonAuth(app){
       boxShadow:'0 8px 24px rgba(0,0,0,.25)', display:'none', zIndex:'12000'
     });
     const grid = document.createElement('div');
-    Object.assign(grid.style, {
-      display:'grid', gridTemplateColumns:'repeat(4, 40px)', gap:'6px'
-    });
+    Object.assign(grid.style, { display:'grid', gridTemplateColumns:'repeat(4, 40px)', gap:'6px' });
     STAMP_LIST.forEach(e=>{
       const b = document.createElement('button');
-      Object.assign(b.style, {
-        width:'40px', height:'40px', fontSize:'22px',
-        border:'none', background:'transparent', cursor:'pointer'
-      });
+      Object.assign(b.style, { width:'40px', height:'40px', fontSize:'22px', border:'none', background:'transparent', cursor:'pointer' });
       b.textContent = e;
       b.addEventListener('click', ()=> { sendStamp(e); hideStampUI(); });
       grid.appendChild(b);
@@ -1604,21 +1495,9 @@ async function ensureAnonAuth(app){
     document.body.appendChild(stampUI);
     return stampUI;
   }
-
-  function toggleStampUI(){
-    if (!stampUI) ensureStampUI();
-    stampUIVisible ? hideStampUI() : showStampUI();
-  }
-  function showStampUI(){
-    if (!stampUI) return;
-    stampUI.style.display = 'block';
-    stampUIVisible = true;
-  }
-  function hideStampUI(){
-    if (!stampUI) return;
-    stampUI.style.display = 'none';
-    stampUIVisible = false;
-  }
+  function toggleStampUI(){ stampUIVisible ? hideStampUI() : showStampUI(); }
+  function showStampUI(){ if (!stampUI) return; stampUI.style.display = 'block'; stampUIVisible = true; }
+  function hideStampUI(){ if (!stampUI) return; stampUI.style.display = 'none'; stampUIVisible = false; }
 
   async function sendStamp(emoji){
     if (!roomId || !seat) return;
@@ -1628,11 +1507,8 @@ async function ensureAnonAuth(app){
         untilMs: Date.now() + 3000,
         ts: serverTimestamp()
       });
-    }catch(e){
-      console.warn('stamp failed', e);
-    }
+    }catch(e){ console.warn('stamp failed', e); }
   }
-
   function handleEmote(emote){
     if (!emote) return;
     const now = Date.now();
@@ -1650,7 +1526,6 @@ async function ensureAnonAuth(app){
       showEmojiBubble(targetEl, e.emoji, remain);
     });
   }
-
   function pickEmoteAnchor(seatKey){
     const gameVisible = !game?.classList.contains('hidden');
     if (gameVisible){
@@ -1658,7 +1533,6 @@ async function ensureAnonAuth(app){
     }
     return document.getElementById(seatKey==='p1' ? 'p1Label' : 'p2Label');
   }
-
   function showEmojiBubble(targetEl, emoji, duration=3000){
     if (!targetEl) return;
     const rect = targetEl.getBoundingClientRect();
@@ -1697,4 +1571,56 @@ async function ensureAnonAuth(app){
     emoteTimers[k] = setTimeout(()=>{}, duration);
   }
 
+  /* === Reveal & Prestart pollers === */
+  function ensurePollers(){
+    if (!countdownTicker){
+      countdownTicker = setInterval(async ()=>{
+        if (!curRoom) return;
+
+        if (curRoom.state==="preparing"){
+          const left = Math.ceil((curRoom.preStartUntilMs - Date.now())/1000);
+          if (left > 0){ showCountdownOverlay(left); }
+          else {
+            showCountdownOverlay("ゲームスタート！", { fontSize: 36 });
+            setTimeout(async ()=>{ hideCountdownOverlay(); if (seat==="p1"){ await maybeAdThenStart(); } }, 1200);
+          }
+          return;
+        }
+
+        if (curRoom.state!=="playing" || curRoom.revealRound !== curRoom.round){
+          hideCountdownOverlay(); return;
+        }
+        const remain = Math.max(0, Math.ceil((curRoom.revealUntilMs - Date.now())/1000));
+        if (remain > 0) showCountdownOverlay(remain); else hideCountdownOverlay();
+      }, 200);
+    }
+
+    if (seat === "p1" && !revealApplyPoller){
+      revealApplyPoller = setInterval(async ()=>{
+        if (!curRoom) return;
+
+        if (curRoom.state==="playing"){
+          const d = curRoom;
+          const both = !!d.players.p1.choice && !!d.players.p2.choice;
+          const revealing = (d.revealRound === d.round);
+          const already = !!(d.lastResult && d.lastResult._round === d.round);
+
+          if (both && revealing && !already && Date.now() >= d.revealUntilMs){
+            const result = judgeRound(d.players.p1, d.players.p2);
+            result._round = d.round;
+            await applyResult(d, result);
+            playResultSfx(result);
+            hideCountdownOverlay();
+            showResultOverlay(makeRoundSummary(result, seat), RESULT_SHOW_MS);
+            scheduleAutoNext(d, RESULT_SHOW_MS);
+          }
+        }
+
+        if (curRoom.state==="ended"){
+          const v = curRoom.rematchVotes || {p1:false,p2:false};
+          if (v.p1 && v.p2){ await startNewMatch(); }
+        }
+      }, 200);
+    }
+  }
 })();
