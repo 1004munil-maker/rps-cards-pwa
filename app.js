@@ -92,7 +92,7 @@ async function ensureAnonAuth(app){
     }
     click(){ this.tone({freq:900,dur:0.03,type:'square',gain:0.04}); }
     play(){ this.tone({freq:660,dur:0.06,type:'triangle',gain:0.05}); }
-    win(){ this.tone({freq:740,dur=0.09,type:'sine',gain:0.06}); setTimeout(()=>this.tone({freq:880,dur:0.09}),90); }
+    win(){ this.tone({freq:740,dur:0.09,type:'sine',gain:0.06}); setTimeout(()=>this.tone({freq:880,dur:0.09}),90); }
     lose(){ this.tone({freq:200,dur:0.12,type:'sawtooth',gain:0.05}); }
     swap(){ this.tone({freq:520,dur:0.06}); setTimeout(()=>this.tone({freq:420,dur:0.06}),70); }
     barrier(){ this.tone({freq:320,dur:0.05}); setTimeout(()=>this.tone({freq:260,dur:0.05}),60); }
@@ -965,7 +965,7 @@ async function ensureAnonAuth(app){
       return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?gain:0, p2: winnerSeat==="p2"?gain:0}, note:"時間切れ" };
     }
     if (card==="WIN"){
-      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1]?4:0, p2: winnerSeat==="p2"?4:0}, note:"時間切れ(必勝)" };
+      return { type:"timeout", winner:winnerSeat, delta:{p1: winnerSeat==="p1"?4:0, p2: winnerSeat==="p2"?4:0}, note:"時間切れ(必勝)" };
     }
     if (card==="SWAP"){
       if (diff<8) return { type:"swap", winner:winnerSeat, swap:true, note:"時間切れ(位置交換)" };
