@@ -1,22 +1,45 @@
 /* =========================================================
-   RPS Cards — app.js（安定版フル / 3秒結果表示＋ランダムマッチ対応）
-   - Firebase自動import（window.FirebaseAPIなければCDNから動的読込）
-   - ランダムマッチ：例外処理強化＆接続確認、タイムアウト安全化
-   - カウントダウンと結果オーバーレイを分離 / 結果は3秒固定表示
+   RPS Cards — app.js v3.4（安定版フル / 3秒結果表示＋ランダムマッチ＋接続警告抑止）
+   - 旧実装が出す「/.info/connected=false」アラートを完全抑止（monkey patch）
+   - Firebase Realtime DB: off() を明示importし、安全にリスナー解除
+   - ランダムマッチ：例外処理強化＆接続“最大待ち”方式（アラート非依存）
+   - カウントダウンと結果オーバーレイ分離／結果は3秒固定表示
    - 入力ロック/解除のタイミング整理（カクつき解消）
    ========================================================= */
+
+/* ===== devバナー（新JSが走っているか目視確認用） ===== */
+(() => {
+  const VER = "RPS app.js v3.4";
+  console.log("%c" + VER, "padding:4px 8px; background:#222; color:#fff; border-radius:6px;");
+  window.__RPS_BUILD__ = VER;
+})();
+
+/* ===== 旧アラート抑止（/.info/connected=false を含むものは無視） ===== */
+(() => {
+  const rawAlert = window.alert;
+  window.alert = function (msg) {
+    try {
+      const s = String(msg || "");
+      if (s.includes("/.info/connected=false")) {
+        console.warn("[suppress] legacy connected alert:", s);
+        return; // ここで完全抑止
+      }
+    } catch (_) {}
+    return rawAlert.apply(this, arguments);
+  };
+})();
 
 /* ========== Firebase import 安全化（必要関数を揃える） ========== */
 async function ensureFirebaseAPI(){
   const need = [
     "initializeApp","getDatabase","ref","onValue","set","update","get","child",
     "serverTimestamp","remove","push","onDisconnect","query","orderByChild",
-    "limitToFirst","runTransaction","equalTo"
+    "limitToFirst","runTransaction","equalTo","off" // ★ off を追加
   ];
   const ok = (api)=> api && need.every(k => typeof api[k] === "function");
   if (ok(window.FirebaseAPI)) return window.FirebaseAPI;
 
-  // 動的import（ESM）
+  // 動的import（CDNのESM）
   const appMod = await import("https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js");
   const dbMod  = await import("https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js");
   const api = {
@@ -37,6 +60,7 @@ async function ensureFirebaseAPI(){
     limitToFirst: dbMod.limitToFirst,
     runTransaction: dbMod.runTransaction,
     equalTo: dbMod.equalTo,
+    off: dbMod.off, // ★ 明示
   };
   window.FirebaseAPI = api;
   return api;
@@ -88,7 +112,7 @@ async function ensureFirebaseAPI(){
   const {
     initializeApp, getDatabase, ref, onValue, set, update, get, child,
     serverTimestamp, remove, push, onDisconnect, query, orderByChild,
-    limitToFirst, runTransaction, equalTo
+    limitToFirst, runTransaction, equalTo, off
   } = await ensureFirebaseAPI();
 
   const firebaseConfig = {
@@ -215,7 +239,7 @@ async function ensureFirebaseAPI(){
       if (res.reason === "NO_ROOM") alert("部屋番号が存在しません");
       else if (res.reason === "FULL") alert("その部屋は満席です");
       else if (res.reason === "NO_NAME") alert("名前を1文字以上入力してね");
-      else alert("参加に失敗しました。時間をおいて再度お試しください。");
+      else alert("参加に失敗しました。時間をおいて再試行してください。");
       return;
     }
     seat = "p2";
@@ -244,33 +268,33 @@ async function ensureFirebaseAPI(){
   if (btnPlay) btnPlay.onclick = () => { sfx.play(); submitCard(); };
 
   // ランダムマッチ
-if (btnRandom) btnRandom.onclick = async ()=>{
-  try{
-    sfx.click();
-    const name = (playerName.value || "").trim();
-    if (!name){ alert("名前を入力してね"); playerName.focus(); return; }
-    myName = name;
+  if (btnRandom) btnRandom.onclick = async ()=>{
+    try{
+      sfx.click();
+      const name = (playerName.value || "").trim();
+      if (!name){ alert("名前を入力してね"); playerName.focus(); return; }
+      myName = name;
 
-    // ✅ 接続は onValue で“最大10秒待つ”。未確定でも続行（アラートは出さない）
-    await waitForConnected(db, 10000);
+      // 接続イベントを“最大10秒だけ”待つ（来なくても続行、アラート出さない）
+      await waitForConnected(db, 10000);
 
-    const r = await startRandomMatch();
-    if (!r.ok){
-      alert("マッチングに失敗しました：" + (r.reason || "unknown"));
-      return;
+      const r = await startRandomMatch();
+      if (!r.ok){
+        alert("マッチングに失敗しました：" + (r.reason || "unknown"));
+        return;
+      }
+
+      roomId = r.roomId;
+      const snap = await get(ref(db, `rooms/${roomId}`));
+      if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
+      const d = snap.val();
+      seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
+      enterLobby();
+    }catch(err){
+      console.error("randomMatch error:", err);
+      alert("マッチング中にエラーが発生しました：" + (err?.message || err));
     }
-
-    roomId = r.roomId;
-    const snap = await get(ref(db, `rooms/${roomId}`));
-    if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
-    const d = snap.val();
-    seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
-    enterLobby();
-  }catch(err){
-    console.error("randomMatch error:", err);
-    alert("マッチング中にエラーが発生しました：" + (err?.message || err));
-  }
-};
+  };
 
   /* [09] 対戦前の広告（ネイティブ時のみ） */
   async function maybeAdThenStart(){
@@ -411,7 +435,6 @@ if (btnRandom) btnRandom.onclick = async ()=>{
         }
       }
     }catch(err){
-      // 検索や部屋作成に失敗
       try{ await remove(myTicketRef); }catch(_){}
       return { ok:false, reason:"PAIRING_FAILED: " + (err?.message || err) };
     }
@@ -429,16 +452,22 @@ if (btnRandom) btnRandom.onclick = async ()=>{
         resolve({ ok:false, reason:"TIMEOUT" });
       }, TIMEOUT_MS);
 
-      const unsub = onValue(myTicketRef, async (snap)=>{
+      // onValueの返り値が void のブラウザでも確実に解除できるようにする
+      const cb = async (snap)=>{
         const v = snap.val();
-        if (!v) { clearTimeout(tid); unsub(); resolve({ ok:false, reason:"CANCELLED" }); return; }
+        if (!v) { clearTimeout(tid); safeUnsub(); resolve({ ok:false, reason:"CANCELLED" }); return; }
         if (v.roomId){
-          clearTimeout(tid); unsub();
+          clearTimeout(tid); safeUnsub();
           const ridFound = v.roomId;
           try{ await remove(myTicketRef); }catch(_){}
           resolve({ ok:true, roomId: ridFound });
         }
-      }, { onlyOnce:false });
+      };
+      const ret = onValue(myTicketRef, cb, (err)=>console.warn(err));
+      function safeUnsub(){
+        if (typeof ret === "function") { try{ ret(); }catch(_){ } }
+        else { try{ off(myTicketRef, 'value', cb); }catch(_){ } }
+      }
     });
   }
 
@@ -935,27 +964,29 @@ if (btnRandom) btnRandom.onclick = async ()=>{
     }
   }
 
-   // RTDB 接続を onValue で待つ（最大 timeoutMs）。true/false を返す。
-// 注意: file:// 実行や初回WS張り直し中は false のままでもあり得るので、呼び出し側で“続行”判断にする。
-function waitForConnected(db, timeoutMs = 3000){
-  return new Promise(resolve=>{
-    const connectedRef = ref(db, ".info/connected");
-    let settled = false;
-    const to = setTimeout(()=>{
-      if (!settled){ settled = true; off?.(); resolve(false); }
-    }, timeoutMs);
+  /* === 接続を onValue で“最大 timeoutMsだけ”待つ（アラートは出さない） === */
+  function waitForConnected(db, timeoutMs = 10000){
+    return new Promise(resolve=>{
+      const connectedRef = ref(db, ".info/connected");
+      let settled = false;
 
-    const off = onValue(connectedRef, snap=>{
-      const v = !!snap.val();
-      if (v && !settled){
-        settled = true;
-        clearTimeout(to);
-        off?.();
-        resolve(true);
+      const cb = (snap)=>{
+        const v = !!snap.val();
+        if (v && !settled){
+          settled = true;
+          clearTimeout(to);
+          safeUnsub();
+          resolve(true);
+        }
+      };
+      const ret = onValue(connectedRef, cb, (err)=>console.warn("connected listen err:", err));
+      function safeUnsub(){
+        if (typeof ret === "function") { try{ ret(); }catch(_){ } }
+        else { try{ off(connectedRef, 'value', cb); }catch(_){ } }
       }
+      const to = setTimeout(()=>{ if (!settled){ settled = true; safeUnsub(); resolve(false); } }, timeoutMs);
     });
-  });
-}
+  }
 
   /* [22] ユーティリティ */
   function randomBasicHand(){
