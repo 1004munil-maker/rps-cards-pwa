@@ -1,9 +1,10 @@
 /* =========================================================
-   RPS Cards — app.js（最終リリース / 40秒統一 & 安定化）
+   RPS Cards — app.js（最終リリース / 40秒統一 & 安定化 & 再試行バグ修正）
    修正タグ：
    [Fix-1] 40秒の総合カウントダウンを常時表示（10s+30s を統合）
    [Fix-2] 待機票の初回書込を最小項目に（ルールと整合）
    [Fix-3] ラウンド切替時にタイマー/ロックを必ず初期化
+   [Fix-4] セッションガード導入（キャンセル後の2回目以降で動かない問題を根絶）
    ========================================================= */
 
 /* ========== Firebase import 安全化 ========== */
@@ -186,7 +187,7 @@ async function ensureAnonAuth(app){
   const BASIC_MIN   = 2;
 
   /* [06] 状態 */
-  let myId = rid(6);        // 表示用ID（uidとは別）
+  let myId = rid(6);
   let myName = "";
   let roomId = "";
   let seat = "";            // "p1" | "p2"
@@ -210,11 +211,14 @@ async function ensureAnonAuth(app){
   let isMatching = false;
   let matchAbort = false;
   let cleanupMatching = null;
-  let overallMatchCountdown = null; // [Fix-1] 40秒の統一タイマー
+  let overallMatchCountdown = null;
 
-  // [Fix-3] ラウンド変化検知用
+  // [Fix-3] ラウンド変化検知
   let lastRenderedRound = 0;
   let lastRoundStartMs = 0;
+
+  // [Fix-4] セッションID
+  let matchSession = 0;
 
   /* [07] 初期盤面 */
   makeBoard();
@@ -274,8 +278,12 @@ async function ensureAnonAuth(app){
     inner.style.opacity = "0";
     setTimeout(()=>{ matchOverlayEl.style.display = "none"; }, 180);
   }
+
+  /* [Fix-4] 完全キャンセル */
   async function cancelMatching(){
     matchAbort = true;
+    // セッション破棄（これ以降、旧セッションのタイマー・購読は自壊）
+    matchSession++;
     try {
       if (typeof cleanupMatching === "function") { await cleanupMatching(); }
     } catch(_) {
@@ -350,6 +358,10 @@ async function ensureAnonAuth(app){
   // ===== ランダム対戦（総40秒カウント） =====
   if (btnRandom) btnRandom.onclick = async ()=>{
     if (isMatching) return;
+
+    // 新規セッション開始
+    const mySession = ++matchSession;
+
     try{
       sfx.click();
       const name = (playerName.value || "").trim().slice(0,20);
@@ -363,10 +375,14 @@ async function ensureAnonAuth(app){
       showMatchOverlay("待機中…", "");
       await waitForConnected(db, 2000);
 
-      // [Fix-1] ★ 総40秒オーバーレイ更新（10秒＋30秒の内訳は非表示）
+      // ★ 総40秒オーバーレイ（セッションガード内）
       const OVERALL_SECONDS = 40;
       const overallDeadline = Date.now() + OVERALL_SECONDS*1000;
       const updateOverall = ()=>{
+        if (mySession !== matchSession) { // 旧セッションなら自壊
+          stopOverallMatchCountdown();
+          return;
+        }
         const left = Math.max(0, Math.ceil((overallDeadline - Date.now())/1000));
         setMatchOverlay("待機中…", `残り ${left} 秒`);
       };
@@ -374,8 +390,9 @@ async function ensureAnonAuth(app){
       stopOverallMatchCountdown();
       overallMatchCountdown = setInterval(updateOverall, 250);
 
-      // ① 既存待機者 10秒（UIは上の総合のみ）
-      const claimRes = await pollAndClaimExisting({ seconds:10, silent:true });
+      // ① 既存待機者 10秒（UIは総合のみ）
+      const claimRes = await pollAndClaimExisting({ seconds:10, silent:true, session: mySession });
+      if (mySession !== matchSession) return; // キャンセルなどで中断
       if (matchAbort) { hideMatchOverlay(); return; }
       if (claimRes.ok){
         hideMatchOverlay();
@@ -383,8 +400,9 @@ async function ensureAnonAuth(app){
         return;
       }
 
-      // ② 自分の待機票で 30秒待機（UIは上の総合のみ）
-      const waitRes = await enqueueAndWait({ seconds:30, silent:true });
+      // ② 自分の待機票で 30秒待機
+      const waitRes = await enqueueAndWait({ seconds:30, silent:true, session: mySession });
+      if (mySession !== matchSession) return;
       if (matchAbort) { hideMatchOverlay(); return; }
 
       hideMatchOverlay();
@@ -404,6 +422,7 @@ async function ensureAnonAuth(app){
       hideMatchOverlay();
       alert("マッチング中にエラー：" + (err?.message || err));
     }finally{
+      // ここは旧セッションでも動く可能性があるので UI は常に復帰させる
       isMatching = false;
       if (btnRandom) btnRandom.disabled = false;
       cleanupMatching = null;
@@ -503,29 +522,28 @@ async function ensureAnonAuth(app){
     enterLobby();
   }
 
-  // 既存待機者を最長N秒奪取（silent=true なら UI 更新なし）
-  async function pollAndClaimExisting({ seconds = 10, silent = false } = {}){
+  // 既存待機者を最長N秒奪取（セッションガード付き）
+  async function pollAndClaimExisting({ seconds = 10, silent = false, session } = {}){
     const until = Date.now() + seconds*1000;
     while(Date.now() < until){
-      if (matchAbort) return { ok:false, reason:"CANCELLED" };
+      if (matchAbort || session !== matchSession) return { ok:false, reason:"CANCELLED" };
       if (!silent){
         const left = Math.ceil((until-Date.now())/1000);
         setMatchOverlay("待機中…", `残り ${left} 秒`);
       }
-      const r = await tryClaimOne();
-      if (matchAbort) return { ok:false, reason:"CANCELLED" };
+      const r = await tryClaimOne(session);
+      if (matchAbort || session !== matchSession) return { ok:false, reason:"CANCELLED" };
       if (r.ok) return r;
       await sleep(1000);
     }
     return { ok:false, reason:"NO_EXISTING" };
   }
 
-  // 自分の待機票で待つ（silent=true なら UI 更新なし）
-  async function enqueueAndWait({ seconds = 30, silent = false } = {}){
+  // 自分の待機票で待つ（セッションガード付き）
+  async function enqueueAndWait({ seconds = 30, silent = false, session } = {}){
     let myTicketRef = null;
     try{
       myTicketRef = push(ref(db, "mm/queue"));
-      // [Fix-2] ルールと一致：初回は uid/name/ts/status のみ
       await set(myTicketRef, {
         uid: authUid,
         name: (myName || "GUEST").slice(0,20),
@@ -538,7 +556,10 @@ async function ensureAnonAuth(app){
     }
 
     return await new Promise((resolve)=>{
+      let finished = false;
       const finish = async (res)=>{
+        if (finished) return;
+        finished = true;
         if (unsub) unsub();
         if (timeout) clearTimeout(timeout);
         cleanupMatching = null;
@@ -547,7 +568,8 @@ async function ensureAnonAuth(app){
       };
 
       const unsub = onValue(myTicketRef, async (snap)=>{
-        if (matchAbort){ finish({ ok:false, reason:"CANCELLED" }); return; }
+        if (finished) return;
+        if (matchAbort || session !== matchSession){ finish({ ok:false, reason:"CANCELLED" }); return; }
         const v = snap.val();
         if (!v) { finish({ ok:false, reason:"CANCELLED" }); return; }
         if (v.roomId){ finish({ ok:true, roomId: v.roomId }); }
@@ -556,6 +578,7 @@ async function ensureAnonAuth(app){
       const timeout = setTimeout(()=>{ finish({ ok:false, reason:"TIMEOUT" }); }, seconds*1000);
 
       cleanupMatching = async ()=>{
+        if (finished) return;
         if (unsub) unsub();
         if (timeout) clearTimeout(timeout);
         try{ await remove(myTicketRef); }catch(_){}
@@ -563,13 +586,13 @@ async function ensureAnonAuth(app){
     });
   }
 
-  // 奪取→部屋作成
-  async function tryClaimOne(){
-    if (matchAbort) return { ok:false, reason:"CANCELLED" };
+  // 奪取→部屋作成（セッションガード付き）
+  async function tryClaimOne(session){
+    if (matchAbort || session !== matchSession) return { ok:false, reason:"CANCELLED" };
     try{
       const q = query(ref(db, "mm/queue"), orderByChild("claimedBy"), equalTo(null), limitToFirst(25));
       const list = await get(q);
-      if (matchAbort) return { ok:false, reason:"CANCELLED" };
+      if (matchAbort || session !== matchSession) return { ok:false, reason:"CANCELLED" };
 
       let candKey = null; let candVal = null;
       const arr = [];
@@ -584,7 +607,7 @@ async function ensureAnonAuth(app){
 
       const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
       const tx = await runTransaction(claimRef, cur => (cur===null ? authUid : cur));
-      if (matchAbort) return { ok:false, reason:"CANCELLED" };
+      if (matchAbort || session !== matchSession) return { ok:false, reason:"CANCELLED" };
       if (!(tx.committed && tx.snapshot.val() === authUid)) return { ok:false, reason:"LOST_RACE" };
 
       const stillThere = await get(ref(db, `mm/queue/${candKey}`));
@@ -603,7 +626,6 @@ async function ensureAnonAuth(app){
         revealUntilMs: null,
         rematchVotes: { p1:false, p2:false },
         players: {
-          // 部屋作成者は p2（自分）でも OK（ルール側で許可済み）
           p1: { uid: candVal.uid, id: rid(6), name: candVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() },
           p2: { uid: authUid,     id: myId,   name: myName       || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() }
         }
@@ -748,7 +770,7 @@ async function ensureAnonAuth(app){
       lastBeepSec = null;
     }
 
-    // [Fix-3] 未提出ならロックを解除（次Rで固まらないように）
+    // [Fix-3] 未提出ならロック解除
     if (!iSubmitted) roundLocked = false;
 
     cardBtns.forEach(b=>{
