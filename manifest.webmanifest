@@ -1,4 +1,5 @@
 {
+  "id": "/",
   "name": "RPS Cards",
   "short_name": "RPS Cards",
   "start_url": "/?source=pwa",

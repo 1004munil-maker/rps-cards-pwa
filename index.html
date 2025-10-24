@@ -23,14 +23,6 @@
   <!-- [H4] CSS -->
   <link rel="stylesheet" href="style.css" />
 
-  <!-- [H5] Firebase CDN（モジュール）-->
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
-    import { getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove }
-      from "https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js";
-    // app.js から使えるようにグローバルへ
-    window.FirebaseAPI = { initializeApp, getDatabase, ref, onValue, set, update, get, child, serverTimestamp, remove };
-  </script>
 </head>
 <body>
   <!-- [B1] 縦固定(9:16)の表示枠 -->
@@ -51,7 +43,7 @@
       <!-- [B4] 参加カード -->
       <section id="auth" class="card">
         <div class="row">
-          <input id="playerName" placeholder="名前（例：CHOI）" maxlength="12" autocomplete="off" />
+          <input id="playerName" placeholder="名前（例：じゃがいも）" maxlength="20" autocomplete="off" />
         </div>
         <div class="row">
           <button id="btnCreate" class="primary">🎉 部屋を作る</button>

@@ -1,5 +1,5 @@
 // service-worker.js
-const CACHE_NAME = 'rps-cards-v1.0.0'; // デプロイのたびに番号を上げると反映が早い
+const CACHE_NAME = 'rps-cards-v1.0.1'; // ← リリース毎に上げる
 const APP_SHELL = [
   './',
   './index.html',
@@ -8,8 +8,9 @@ const APP_SHELL = [
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
+  './icons/maskable-512.png'
 ];
-8
+
 // インストール：アプリシェルを先取りキャッシュ
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -33,7 +34,7 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
 
-  // 1) 非GETは触らない（書き込み系やWSなど）
+  // 1) 非GETは触らない
   if (req.method !== 'GET') return;
 
   // 2) 広告/SDK/DB系はネット直通（キャッシュしない）
@@ -44,22 +45,22 @@ self.addEventListener('fetch', (event) => {
     'securepubads.g.doubleclick.net',
     'firebaseio.com',                   // Realtime DB
     'googleapis.com',
-    'gstatic.com'                       // firebase CDNなど
+    'gstatic.com'                       // Firebase CDNなど
   ];
   if (bypassHosts.some(h => url.hostname.endsWith(h))) {
     event.respondWith(fetch(req));
     return;
   }
 
-  // 3) HTMLは network-first（更新を取り込みつつ、オフライン時はキャッシュ）
-  if (req.headers.get('accept')?.includes('text/html')) {
+  // 3) ナビゲーション(HTML)は network-first（オフライン時はindex.html）
+  if (req.mode === 'navigate' || req.headers.get('accept')?.includes('text/html')) {
     event.respondWith(
       fetch(req).then((res) => {
         const copy = res.clone();
         caches.open(CACHE_NAME).then((c) => c.put(req, copy));
         return res;
       }).catch(() =>
-        caches.match(req).then((r) => r || caches.match('./index.html'))
+        caches.match('./index.html')
       )
     );
     return;
@@ -91,4 +92,11 @@ self.addEventListener('fetch', (event) => {
       return cached || fetching;
     })
   );
+});
+
+// （任意）即時更新したい場合に使う
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
