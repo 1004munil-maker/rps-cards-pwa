@@ -113,7 +113,6 @@ async function ensureFirebaseAPI(){
   };
  const app = initializeApp(firebaseConfig);
 const { getAuth, signInAnonymously } = await import("https://www.gstatic.com/firebasejs/11.0.1/firebase-auth.js");
-const auth = getAuth(app);
 await signInAnonymously(auth);
 const authUid = auth.currentUser.uid;
   
