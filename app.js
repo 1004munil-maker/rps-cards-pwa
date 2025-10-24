@@ -1,10 +1,11 @@
 /* =========================================================
-   RPS Cards — app.js（最終リリース / 40秒統一 & 安定化 & 再試行バグ修正）
+   RPS Cards — app.js（最終リリース / 40秒統一 & 安定化 & 再試行バグ修正 + 自動スタート）
    修正タグ：
    [Fix-1] 40秒の総合カウントダウンを常時表示（10s+30s を統合）
    [Fix-2] 待機票の初回書込を最小項目に（ルールと整合）
    [Fix-3] ラウンド切替時にタイマー/ロックを必ず初期化
    [Fix-4] セッションガード導入（キャンセル後の2回目以降で動かない問題を根絶）
+   [Fix-5] 両者そろったら自動スタート（p1 がロビー監視して自動開始）
    ========================================================= */
 
 /* ========== Firebase import 安全化 ========== */
@@ -144,7 +145,7 @@ async function ensureAnonAuth(app){
   const roomIdLabel= $("#roomIdLabel");
   const p1Label    = $("#p1Label");
   const p2Label    = $("#p2Label");
-  const btnStart   = $("#btnStart");
+  const btnStart   = $("#btnStart");   // ← 使わなくてもOK（残置）
   const btnLeave   = $("#btnLeave");
 
   const game       = $("#game");
@@ -341,7 +342,7 @@ async function ensureAnonAuth(app){
     sfx.click();
   };
 
-  if (btnStart) btnStart.onclick = async () => { await maybeAdThenStart(); };
+  if (btnStart) btnStart.onclick = async () => { await maybeAdThenStart(); }; // ← 手動開始は残す（任意）
   if (btnLeave) btnLeave.onclick = () => { sfx.click(); leaveRoom(); };
   if (btnExit)  btnExit.onclick  = () => { sfx.click(); leaveRoom(); };
 
@@ -422,7 +423,6 @@ async function ensureAnonAuth(app){
       hideMatchOverlay();
       alert("マッチング中にエラー：" + (err?.message || err));
     }finally{
-      // ここは旧セッションでも動く可能性があるので UI は常に復帰させる
       isMatching = false;
       if (btnRandom) btnRandom.disabled = false;
       cleanupMatching = null;
@@ -508,7 +508,17 @@ async function ensureAnonAuth(app){
       curRoom = d;
       renderGame(d);
       ensurePollers();
+      autoStartIfReady(d); // [Fix-5] 自動スタート判定（p1のみ）
     });
+  }
+
+  /* [Fix-5] 自動スタート：p1がロビーで両者揃いを検知したら開始 */
+  async function autoStartIfReady(d){
+    if (seat !== "p1") return;
+    if (d.state !== "lobby") return;
+    if (!(d?.players?.p1?.uid && d?.players?.p2?.uid)) return;
+    // ここで開始（idempotent）
+    await startGame();
   }
 
   /* ========== マッチング内部 ========== */
@@ -744,7 +754,7 @@ async function ensureAnonAuth(app){
 
     if (p1Label) p1Label.textContent = d.players.p1?.name || "-";
     if (p2Label) p2Label.textContent = d.players.p2?.name || "-";
-    if (btnStart) btnStart.disabled = !(seat==="p1" && d.players.p1?.uid && d.players.p2?.uid) || d.state!=="lobby";
+    if (btnStart) btnStart.disabled = true; // ← 自動開始するので基本不要
 
     updateCounts(me.hand);
     placeTokens(d.players.p1.pos, d.players.p2.pos, d.boardSize);
