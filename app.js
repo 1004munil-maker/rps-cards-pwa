@@ -1,10 +1,13 @@
 /* =========================================================
-   RPS Cards — app.js (CLEAN FINAL)
+   RPS Cards — app.js (CLEAN FINAL, rules-aligned)
    - ランダムマッチ2回目以降OK（UI完全復帰）
    - 相手退室は「居た→いなくなった」時のみ発火（新規作成直後は出さない）
    - 手動参加は players/p2 の最小更新のみ（ルール準拠）
    - Ready→3,2,1→「ゲームスタート！」（36px）
    - スタンプ維持
+   - p2 退室時は上位フィールドを書かない（rules 準拠）
+   - judgeRound のバリア判定バグ修正
+   - ensurePollers を1本化
    ========================================================= */
 
 /* ========== Firebase import 安全化 ========== */
@@ -475,7 +478,6 @@ async function ensureAnonAuth(app){
     const d = snap.val();
     if (d.players?.p2?.uid) return { ok:false, reason:"FULL" };
 
-    // ルールに合わせ、必要最小限だけ更新
     await update(ref(db, `rooms/${id}/players/p2`), {
       uid: authUid, id: myId, name, pos: 0, choice: null, hand: randomHand(), joinedAt: serverTimestamp(), ready: false
     });
@@ -685,7 +687,7 @@ async function ensureAnonAuth(app){
     });
   }
 
-  /* [13] 退出 */
+  /* [13] 退出（rules準拠：p2は上位フィールドを書かない） */
   async function leaveRoom(){
     try {
       if (btnLeave) btnLeave.disabled = true;
@@ -704,6 +706,7 @@ async function ensureAnonAuth(app){
       if (seat === "p1") {
         await remove(ref(db, `rooms/${roomId}`));
       } else {
+        // p2 は自分のスロットのみクリア（state/round等は触らない）
         const base = `rooms/${roomId}/players/p2`;
         const updates = {};
         updates[`${base}/uid`]      = null;
@@ -714,16 +717,6 @@ async function ensureAnonAuth(app){
         updates[`${base}/hand`]     = randomHand();
         updates[`${base}/joinedAt`] = null;
         updates[`${base}/ready`]    = false;
-
-        if (d.state !== "lobby") {
-          updates[`rooms/${roomId}/state`]            = "lobby";
-          updates[`rooms/${roomId}/round`]            = 0;
-          updates[`rooms/${roomId}/roundStartMs`]     = null;
-          updates[`rooms/${roomId}/lastResult`]       = null;
-          updates[`rooms/${roomId}/revealRound`]      = null;
-          updates[`rooms/${roomId}/revealUntilMs`]    = null;
-          updates[`rooms/${roomId}/preStartUntilMs`]  = null;
-        }
         await update(ref(db), updates);
       }
     } catch (err) {
@@ -1034,7 +1027,7 @@ async function ensureAnonAuth(app){
     return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0} };
   }
 
-  /* [19] 判定 */
+  /* [19] 判定（バリア判定バグ修正済） */
   function judgeRound(p1, p2){
     const a = p1.choice, b = p2.choice;
 
@@ -1043,8 +1036,8 @@ async function ensureAnonAuth(app){
     if (a==="BARRIER" && (b==="WIN"||b==="SWAP")) return { type:"barrier", winner:"p1", delta:{p1:0,p2:0}, barrier:true };
     if (b==="BARRIER" && (a==="WIN"||a==="SWAP")) return { type:"barrier", winner:"p2", delta:{p1:0,p2:0}, barrier:true };
 
-    if (a==="BARRIER" && (b==="G"||"C"||"P")) return { type:"barrier-penalty", winner:"p2", delta:{p1:-1,p2:0} };
-    if (b==="BARRIER" && (a==="G"||"C"||"P")) return { type:"barrier-penalty", winner:"p1", delta:{p1:0,p2:-1} };
+    if (a==="BARRIER" && (b==="G"||b==="C"||b==="P")) return { type:"barrier-penalty", winner:"p2", delta:{p1:-1,p2:0} };
+    if (b==="BARRIER" && (a==="G"||a==="C"||a==="P")) return { type:"barrier-penalty", winner:"p1", delta:{p1:0,p2:-1} };
 
     if (a==="BARRIER" && b==="BARRIER") return { type:"tie", winner:null, delta:{p1:0,p2:0} };
 
@@ -1267,7 +1260,7 @@ async function ensureAnonAuth(app){
     setTimeout(()=>{ countdownOverlayEl.style.display = "none"; }, 180);
   }
 
-  // === ポーラー ===
+  /* === Reveal & Prestart pollers（一本化） === */
   function ensurePollers(){
     if (!countdownTicker){
       countdownTicker = setInterval(async ()=>{
@@ -1326,10 +1319,6 @@ async function ensureAnonAuth(app){
         }
       }, 200);
     }
-  }
-  function clearPollers(){
-    if (countdownTicker){ clearInterval(countdownTicker); countdownTicker=null; }
-    if (revealApplyPoller){ clearInterval(revealApplyPoller); revealApplyPoller=null; }
   }
 
   /* === 再戦 === */
@@ -1536,7 +1525,7 @@ async function ensureAnonAuth(app){
   function showEmojiBubble(targetEl, emoji, duration=3000){
     if (!targetEl) return;
     const rect = targetEl.getBoundingClientRect();
-    const bubble = document.createElement('div');
+    const bubble = document.createElement("div");
     bubble.className = 'emote-bubble';
     Object.assign(bubble.style, {
       position:'fixed',
@@ -1571,56 +1560,22 @@ async function ensureAnonAuth(app){
     emoteTimers[k] = setTimeout(()=>{}, duration);
   }
 
-  /* === Reveal & Prestart pollers === */
-  function ensurePollers(){
-    if (!countdownTicker){
-      countdownTicker = setInterval(async ()=>{
-        if (!curRoom) return;
+  /* === Pollers は上で一本化 === */
 
-        if (curRoom.state==="preparing"){
-          const left = Math.ceil((curRoom.preStartUntilMs - Date.now())/1000);
-          if (left > 0){ showCountdownOverlay(left); }
-          else {
-            showCountdownOverlay("ゲームスタート！", { fontSize: 36 });
-            setTimeout(async ()=>{ hideCountdownOverlay(); if (seat==="p1"){ await maybeAdThenStart(); } }, 1200);
-          }
-          return;
-        }
+  /* === 再戦 UI 関連は上に実装済み === */
 
-        if (curRoom.state!=="playing" || curRoom.revealRound !== curRoom.round){
-          hideCountdownOverlay(); return;
-        }
-        const remain = Math.max(0, Math.ceil((curRoom.revealUntilMs - Date.now())/1000));
-        if (remain > 0) showCountdownOverlay(remain); else hideCountdownOverlay();
-      }, 200);
-    }
-
-    if (seat === "p1" && !revealApplyPoller){
-      revealApplyPoller = setInterval(async ()=>{
-        if (!curRoom) return;
-
-        if (curRoom.state==="playing"){
-          const d = curRoom;
-          const both = !!d.players.p1.choice && !!d.players.p2.choice;
-          const revealing = (d.revealRound === d.round);
-          const already = !!(d.lastResult && d.lastResult._round === d.round);
-
-          if (both && revealing && !already && Date.now() >= d.revealUntilMs){
-            const result = judgeRound(d.players.p1, d.players.p2);
-            result._round = d.round;
-            await applyResult(d, result);
-            playResultSfx(result);
-            hideCountdownOverlay();
-            showResultOverlay(makeRoundSummary(result, seat), RESULT_SHOW_MS);
-            scheduleAutoNext(d, RESULT_SHOW_MS);
-          }
-        }
-
-        if (curRoom.state==="ended"){
-          const v = curRoom.rematchVotes || {p1:false,p2:false};
-          if (v.p1 && v.p2){ await startNewMatch(); }
-        }
-      }, 200);
-    }
+  /* === 接続確認 === */
+  function waitForConnected(db, timeoutMs = 10000){
+    return new Promise(resolve=>{
+      const connectedRef = ref(db, ".info/connected");
+      let settled = false;
+      const to = setTimeout(()=>{
+        if (!settled){ settled = true; unsub?.(); resolve(false); }
+      }, timeoutMs);
+      const unsub = onValue(connectedRef, snap=>{
+        const v = !!snap.val();
+        if (v && !settled){ settled = true; clearTimeout(to); unsub?.(); resolve(true); }
+      });
+    });
   }
 })();
