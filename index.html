@@ -1,7 +1,6 @@
 <!doctype html>
 <html lang="ja">
 <head>
-  <!-- [H1] 基本メタ -->
   <meta charset="utf-8" />
   <meta name="viewport"
         content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -10,24 +9,19 @@
   <meta name="theme-color" content="#ff99c8">
   <title>じゃんけんカード・レース</title>
 
-  <!-- [H2] PWA -->
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
 
-  <!-- [H3] Google AdSense（オート広告） -->
   <script async
     src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3891016340964160"
     crossorigin="anonymous"></script>
 
-  <!-- [H4] CSS -->
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- [B1] 縦固定(9:16)の表示枠 -->
   <div id="root9x16" class="root9x16">
     <main class="wrap">
-      <!-- [B2] ブランド／ヘッダ -->
       <header class="brand">
         <div class="brand__left">
           <div class="brand__icon">🧸</div>
@@ -39,7 +33,7 @@
         <button id="helpBtn" class="help-fab" aria-label="あそびかた">?</button>
       </header>
 
-      <!-- [B4] 参加カード -->
+      <!-- 参加カード -->
       <section id="auth" class="card">
         <div class="row">
           <input id="playerName" placeholder="名前（例：じゃがいも）" maxlength="20" autocomplete="off" />
@@ -57,7 +51,7 @@
         </div>
       </section>
 
-      <!-- [B5] ロビー -->
+      <!-- ロビー -->
       <section id="lobby" class="card hidden">
         <p class="row row--space">
           <span>部屋ID: <b id="roomIdLabel"></b></span>
@@ -74,7 +68,7 @@
         </div>
       </section>
 
-      <!-- [B6] ゲーム -->
+      <!-- ゲーム -->
       <section id="game" class="hidden">
         <div class="infoBar">
           <div>ラウンド <b id="roundNo">-</b> / <span id="minRounds">8</span>+</div>
@@ -82,20 +76,18 @@
           <div>差：<b id="diff">0</b>マス</div>
         </div>
 
-        <!-- ★ 決闘ヘッダ（左右に名前、中央にVS） -->
+        <!-- 決闘ヘッダ（左右の名前 / 中央にVS） -->
         <div class="duelHeader">
           <div class="duelName duelName--me">
             <span id="duelMeName">-</span>
-            <span class="speech" id="duelMeSpeech"></span>
           </div>
           <div class="duelVS">VS</div>
           <div class="duelName duelName--op">
             <span id="duelOpName">-</span>
-            <span class="speech" id="duelOpSpeech"></span>
           </div>
         </div>
 
-        <!-- ★ 10×2 グリッド -->
+        <!-- 10×2 グリッド -->
         <div class="board board--10x2" id="board"></div>
 
         <div class="status">
@@ -143,7 +135,7 @@
           <div class="row">
             <button id="btnPlay" class="primary" disabled>このカードを出す</button>
             <button id="btnClear" class="ghost">選択解除</button>
-            <!-- ※ スタンプボタンは JS が 1つだけ生成します（重複防止のためHTMLからは削除） -->
+            <button id="btnStamp" class="ghost">スタンプ</button>
           </div>
           <p id="stateMsg" class="help">10秒以内に出してね（出さないと負け）</p>
         </section>
@@ -156,7 +148,6 @@
 
       <footer class="footer"><small>© 2025 RPS Cards — pastel & comfy 💗 1.0.0</small></footer>
 
-      <!-- [B9] 手動ディスプレイ広告（ゲームの下 / 非固定） -->
       <section class="ad-card card">
         <ins class="adsbygoogle"
              style="display:block"
@@ -171,12 +162,10 @@
     </main>
   </div>
 
-  <!-- [B7] 横向き時のガード -->
   <div class="orientation-guard" id="orientationGuard">
     <div class="og-card">📱 画面を縦向きにしてください</div>
   </div>
 
-  <!-- [B7.5] ヘルプモーダル -->
   <div id="helpModal" class="help-modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
     <div class="help-modal__card">
       <div class="help-modal__head">
@@ -201,10 +190,8 @@
     </div>
   </div>
 
-  <!-- [B8] アプリ本体 -->
   <script type="module" src="app.js"></script>
 
-  <!-- [B9] ヘルプ開閉（app.js とは独立） -->
   <script>
     const $ = s => document.querySelector(s);
     const helpBtn = $('#helpBtn'), helpModal = $('#helpModal');
@@ -219,7 +206,6 @@
     helpModal?.addEventListener('click', (e)=>{ if(e.target===helpModal) closeHelp(); });
   </script>
 
-  <!-- [B10] Service Worker -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
