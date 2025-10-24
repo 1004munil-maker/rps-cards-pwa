@@ -1,12 +1,14 @@
 /* =========================================================
-   RPS Cards — app.js（マッチングUI強化版 / インデックス不足フォールバック）
-   - ランダムマッチ：
-     * 10秒間の「相手を探しています…」オーバーレイを表示
-     * .indexOn(claimedBy)未設定でも、開発向けに全件スキャンでフォールバック
-   - 既存のゲーム仕様は踏襲（3秒結果表示 等）
+   RPS Cards — app.js（ランダム対戦リファクタ / 二重定義バグ修正）
+   - クリック無反応の主因：boardEl の二重定義を除去
+   - ランダム対戦フロー（あなたの要望通り）：
+     1) 既存待機者を 1秒間隔×10秒 ポーリングして奪取
+     2) 見つからなければ自分の待機票を作成し 30秒 待つ
+     3) 双方干渉しない専用待機キュー /mm/queue
+   - 競合は runTransaction で解決、UIオーバーレイで進捗表示
    ========================================================= */
 
-/* ========== Firebase import 安全化（必要関数を揃える） ========== */
+/* ========== Firebase import 安全化 ========== */
 async function ensureFirebaseAPI(){
   const need = [
     "initializeApp","getDatabase","ref","onValue","set","update","get","child",
@@ -16,7 +18,6 @@ async function ensureFirebaseAPI(){
   const ok = (api)=> api && need.every(k => typeof api[k] === "function");
   if (ok(window.FirebaseAPI)) return window.FirebaseAPI;
 
-  // 動的import（ESM）
   const appMod = await import("https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js");
   const dbMod  = await import("https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js");
   const api = {
@@ -58,7 +59,7 @@ async function ensureFirebaseAPI(){
   document.addEventListener('wheel', e => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
   (async () => { try { if (screen.orientation?.lock) await screen.orientation.lock('portrait'); } catch(_) {} })();
 
-  /* [02] 効果音（SFX：そのまま） */
+  /* [02] 効果音 */
   class SFX {
     constructor() { this.ctx=null; this.enabled=true; }
     ensure(){ if(!this.ctx){ const AC=window.AudioContext||window.webkitAudioContext; if(AC) this.ctx=new AC(); } if(this.ctx&&this.ctx.state==='suspended') this.ctx.resume(); }
@@ -125,7 +126,7 @@ async function ensureFirebaseAPI(){
   const minRoundsEl= $("#minRounds");
   const timerEl    = $("#timer");
   const diffEl     = $("#diff");
-  const boardEl    = $("#board");
+  const boardEl    = $("#board"); // ← ここだけで定義（重複禁止！）
   const mePosEl    = $("#mePos");
   const opPosEl    = $("#opPos");
   const stateMsg   = $("#stateMsg");
@@ -149,7 +150,7 @@ async function ensureFirebaseAPI(){
   guardNameButtons();
   playerName?.addEventListener('input', guardNameButtons);
 
-  /* [05] 定数（仕様） */
+  /* [05] 定数 */
   const BOARD_SIZE = 20;
   const MIN_ROUNDS = 8;
   const TURN_TIME  = 10_000;
@@ -157,7 +158,6 @@ async function ensureFirebaseAPI(){
   const RESULT_SHOW_MS = 3000;
   const COUNTDOWN_TICK_MS = 250;
 
-  // G/C/P 合計 15、各最低 2
   const BASIC_TOTAL = 15;
   const BASIC_MIN   = 2;
 
@@ -180,7 +180,10 @@ async function ensureFirebaseAPI(){
   let resultOverlayTimerId = null;
   let countdownOverlayEl = null;
 
-  // マッチング用オーバーレイ
+  /* [07] 初期描画（盤面） */
+  makeBoard();
+
+  /* ========== マッチング用オーバーレイ ========== */
   let matchOverlayEl = null;
   function ensureMatchOverlay(){
     if (matchOverlayEl) return matchOverlayEl;
@@ -194,7 +197,7 @@ async function ensureFirebaseAPI(){
     inner.id = "overlayMatchInner";
     Object.assign(inner.style, {
       background:"#fff", borderRadius:"16px", padding:"18px 24px",
-      fontSize:"18px", textAlign:"center", minWidth:"240px",
+      fontSize:"18px", textAlign:"center", minWidth:"260px",
       boxShadow:"0 8px 24px rgba(0,0,0,.25)", fontWeight:"700",
       transform:"scale(.94)", opacity:"0", transition:"transform .18s ease, opacity .18s ease"
     });
@@ -205,12 +208,9 @@ async function ensureFirebaseAPI(){
     document.body.appendChild(matchOverlayEl);
     return matchOverlayEl;
   }
-  function showMatchOverlay(msg, sub="最大10秒"){ const el=ensureMatchOverlay(); const inner=el.querySelector("#overlayMatchInner"); el.querySelector("#overlayMatchMsg").textContent=msg; el.querySelector("#overlayMatchSub").textContent=sub; el.style.display="flex"; requestAnimationFrame(()=>{ inner.style.transform="scale(1)"; inner.style.opacity="1"; }); }
-  function setMatchOverlay(msg, sub){ if (!matchOverlayEl) return; const m=matchOverlayEl.querySelector("#overlayMatchMsg"); const s=matchOverlayEl.querySelector("#overlayMatchSub"); if (msg) m.textContent=msg; if (sub!=null) s.textContent=sub; }
+  function showMatchOverlay(msg, sub=""){ const el=ensureMatchOverlay(); const inner=el.querySelector("#overlayMatchInner"); setMatchOverlay(msg, sub); el.style.display="flex"; requestAnimationFrame(()=>{ inner.style.transform="scale(1)"; inner.style.opacity="1"; }); }
+  function setMatchOverlay(msg, sub){ if (!matchOverlayEl) return; const m=matchOverlayEl.querySelector("#overlayMatchMsg"); const s=matchOverlayEl.querySelector("#overlayMatchSub"); if (msg!=null) m.textContent=msg; if (sub!=null) s.textContent=sub; }
   function hideMatchOverlay(){ if (!matchOverlayEl) return; const inner=matchOverlayEl.querySelector("#overlayMatchInner"); inner.style.transform="scale(.94)"; inner.style.opacity="0"; setTimeout(()=>{ matchOverlayEl.style.display="none"; }, 180); }
-
-  /* [07] 初期描画（盤面） */
-  makeBoard();
 
   /* [08] イベント紐づけ */
   if (btnCreate) btnCreate.onclick = async () => {
@@ -271,7 +271,7 @@ async function ensureFirebaseAPI(){
   };
   if (btnPlay) btnPlay.onclick = () => { sfx.play(); submitCard(); };
 
-  // ランダムマッチ（10秒スピナー＋インデックス不足フォールバック）
+  // ===== ランダム対戦（新フロー） =====
   if (btnRandom) btnRandom.onclick = async ()=>{
     try{
       sfx.click();
@@ -279,34 +279,43 @@ async function ensureFirebaseAPI(){
       if (!name){ alert("名前を入力してね"); playerName.focus(); return; }
       myName = name;
 
-      showMatchOverlay("マッチング相手を探しています…", "最大10秒");
-      await waitForConnected(db, 2000); // 接続確立待ち（黙って待つ）
+      showMatchOverlay("相手を探しています…", "既存待機者を最大10秒検索");
+      await waitForConnected(db, 2000);
 
-      const r = await startRandomMatch({ timeoutMs: 10000, onStatus: (msg, sub)=> setMatchOverlay(msg, sub) });
-      hideMatchOverlay();
-
-      if (!r.ok){
-        // インデックス不足を明示
-        if (r.reason && String(r.reason).includes("INDEX_MISSING")) {
-          alert("マッチングに失敗しました（開発用メモ）：/mm/queue に「.indexOn: claimedBy」を追加してください。");
-        } else if (r.reason === "TIMEOUT") {
-          alert("相手が見つかりませんでした。しばらくしてからもう一度お試しください。");
-        } else {
-          alert("マッチングに失敗しました：" + (r.reason || "unknown"));
-        }
+      // ① 既存待機者を 1秒ごとに10秒探す
+      const claimRes = await pollAndClaimExisting({ seconds:10 });
+      if (claimRes.ok){
+        hideMatchOverlay();
+        roomId = claimRes.roomId;
+        const snap = await get(ref(db, `rooms/${roomId}`));
+        if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
+        const d = snap.val();
+        seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
+        enterLobby();
         return;
       }
 
-      roomId = r.roomId;
+      // ② 自分の待機票を作って 30秒待つ
+      setMatchOverlay("待機列に入りました…", "誰かが来るのを最大30秒待ちます");
+      const waitRes = await enqueueAndWait({ seconds:30 });
+      hideMatchOverlay();
+
+      if (!waitRes.ok){
+        alert("いまは相手がいませんでした。また後でお試しください。");
+        return;
+      }
+
+      roomId = waitRes.roomId;
       const snap = await get(ref(db, `rooms/${roomId}`));
       if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
       const d = snap.val();
       seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
       enterLobby();
+
     }catch(err){
       hideMatchOverlay();
       console.error("randomMatch error:", err);
-      alert("マッチング中にエラーが発生しました：" + (err?.message || err));
+      alert("マッチング中にエラー：" + (err?.message || err));
     }
   };
 
@@ -391,15 +400,28 @@ async function ensureFirebaseAPI(){
     });
   }
 
-  /* === ランダムマッチング（強化） === */
+  /* ========== ランダムマッチング内部 ========== */
+
   function isMissingIndexError(err){
     const s = String(err?.message || err || "");
     return /index\s*not\s*defined|\.indexOn/i.test(s);
   }
 
-  async function startRandomMatch({ timeoutMs = 10000, onStatus = ()=>{} } = {}){
-    onStatus("マッチング相手を探しています…", "最大10秒");
-    let myTicketRef;
+  // 既存待機者を最長N秒、1秒間隔で奪取トライ
+  async function pollAndClaimExisting({ seconds = 10 } = {}){
+    const until = Date.now() + seconds*1000;
+    while(Date.now() < until){
+      setMatchOverlay("相手を探しています…", `残り ${Math.ceil((until-Date.now())/1000)} 秒`);
+      const r = await tryClaimOne();
+      if (r.ok) return r;
+      await sleep(1000);
+    }
+    return { ok:false, reason:"NO_EXISTING" };
+  }
+
+  // 待機票を作って最長N秒待つ
+  async function enqueueAndWait({ seconds = 30 } = {}){
+    let myTicketRef = null;
     try{
       myTicketRef = push(ref(db, 'mm/queue'));
       await set(myTicketRef, {
@@ -415,25 +437,93 @@ async function ensureFirebaseAPI(){
       return { ok:false, reason:"QUEUE_WRITE_DENIED: " + (err?.message || err) };
     }
 
-    // 既存待機者を検索して奪取
-    let pairedRoomId = null;
-    let usedFallback = false;
+    return await new Promise((resolve)=>{
+      const deadline = Date.now() + seconds*1000;
+      const tick = setInterval(()=>{
+        setMatchOverlay("待機中…", `残り ${Math.max(0,Math.ceil((deadline-Date.now())/1000))} 秒`);
+      }, 250);
+
+      const timeout = setTimeout(async ()=>{
+        clearInterval(tick);
+        unsub?.();
+        try{ await remove(myTicketRef); }catch(_){}
+        resolve({ ok:false, reason:"TIMEOUT" });
+      }, seconds*1000);
+
+      const unsub = onValue(myTicketRef, async (snap)=>{
+        const v = snap.val();
+        if (!v) { clearTimeout(timeout); clearInterval(tick); unsub(); resolve({ ok:false, reason:"CANCELLED" }); return; }
+        if (v.roomId){
+          clearTimeout(timeout); clearInterval(tick); unsub();
+          const ridFound = v.roomId;
+          try{ await remove(myTicketRef); }catch(_){}
+          resolve({ ok:true, roomId: ridFound });
+        }
+      });
+    });
+  }
+
+  // 1回分：既存待機者リストから最古(ts最小)を見つけ、トランザクションでclaimedByを自分に→部屋作成
+  async function tryClaimOne(){
     try{
-      onStatus("待機中の相手を確認中…");
-      const q = query(ref(db, 'mm/queue'), orderByChild('claimedBy'), equalTo(null), limitToFirst(10));
+      const q = query(ref(db, 'mm/queue'), orderByChild('claimedBy'), equalTo(null), limitToFirst(25));
       const list = await get(q);
 
-      let targetKey = null, targetVal = null;
+      let candKey = null, candVal = null;
+      const arr = [];
       list.forEach(snap=>{
         const v = snap.val(); const k = snap.key;
         if (!v || v.uid === myId) return;
-        if (!targetKey) { targetKey = k; targetVal = v; }
+        arr.push({ k, v });
       });
+      // tsの古い順に
+      arr.sort((a,b)=> (a.v.ts||0) - (b.v.ts||0));
+      if (arr.length){ candKey = arr[0].k; candVal = arr[0].v; }
+      if (!candKey) return { ok:false, reason:"EMPTY" };
 
-      if (targetKey){
-        const claimRef = ref(db, `mm/queue/${targetKey}/claimedBy`);
-        const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
-        if (tx.committed && tx.snapshot.val() === myId){
+      // 奪取（同時競合はサーバが調停）
+      const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
+      const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
+      if (!(tx.committed && tx.snapshot.val() === myId)) return { ok:false, reason:"LOST_RACE" };
+
+      // 部屋作成 & 相手待機票更新
+      const newRoomId = rid(6);
+      await set(ref(db, `rooms/${newRoomId}`), {
+        createdAt: serverTimestamp(),
+        state: "lobby",
+        round: 0,
+        minRounds: MIN_ROUNDS,
+        boardSize: BOARD_SIZE,
+        roundStartMs: null,
+        lastResult: null,
+        revealRound: null,
+        revealUntilMs: null,
+        rematchVotes: { p1:false, p2:false },
+        players: {
+          p1: { id: candVal.uid, name: candVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() },
+          p2: { id: myId,       name: myName    || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() }
+        }
+      });
+      await update(ref(db, `mm/queue/${candKey}`), { status:"paired", roomId: newRoomId });
+
+      return { ok:true, roomId: newRoomId };
+
+    }catch(err){
+      if (isMissingIndexError(err)){
+        // 最低限の開発用フォールバック：全件取得→最古を奪取
+        try{
+          const allSnap = await get(ref(db, 'mm/queue'));
+          const all = allSnap.exists() ? allSnap.val() : {};
+          const arr = Object.entries(all)
+            .filter(([k,v])=> v && v.uid !== myId && v.claimedBy == null)
+            .sort((a,b)=> (a[1].ts||0) - (b[1].ts||0));
+          if (!arr.length) return { ok:false, reason:"EMPTY" };
+
+          const [candKey, candVal] = arr[0];
+          const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
+          const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
+          if (!(tx.committed && tx.snapshot.val() === myId)) return { ok:false, reason:"LOST_RACE" };
+
           const newRoomId = rid(6);
           await set(ref(db, `rooms/${newRoomId}`), {
             createdAt: serverTimestamp(),
@@ -447,88 +537,18 @@ async function ensureFirebaseAPI(){
             revealUntilMs: null,
             rematchVotes: { p1:false, p2:false },
             players: {
-              p1: { id: targetVal.uid, name: targetVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() },
-              p2: { id: myId,       name: myName || "P2",       pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() }
+              p1: { id: candVal.uid, name: candVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() },
+              p2: { id: myId,       name: myName    || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() }
             }
           });
-          await update(ref(db, `mm/queue/${targetKey}`), { status:"paired", roomId: newRoomId });
-          await update(myTicketRef,                         { status:"paired", roomId: newRoomId });
-          pairedRoomId = newRoomId;
-        }
-      }
-    }catch(err){
-      if (isMissingIndexError(err)){
-        // ★ 開発用フォールバック（インデックス無しでも動かす）
-        usedFallback = true;
-        onStatus("開発モード：インデックスなしでスキャン中…");
-        try{
-          const allSnap = await get(ref(db, 'mm/queue')); // 注意: 本番では非推奨（全件）
-          const all = allSnap.exists() ? allSnap.val() : {};
-          let targetKey = null, targetVal = null;
-          for (const [k,v] of Object.entries(all)){
-            if (!v || v.uid === myId) continue;
-            if (v.claimedBy == null){ targetKey = k; targetVal = v; break; }
-          }
-          if (targetKey){
-            const claimRef = ref(db, `mm/queue/${targetKey}/claimedBy`);
-            const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
-            if (tx.committed && tx.snapshot.val() === myId){
-              const newRoomId = rid(6);
-              await set(ref(db, `rooms/${newRoomId}`), {
-                createdAt: serverTimestamp(),
-                state: "lobby",
-                round: 0,
-                minRounds: MIN_ROUNDS,
-                boardSize: BOARD_SIZE,
-                roundStartMs: null,
-                lastResult: null,
-                revealRound: null,
-                revealUntilMs: null,
-                rematchVotes: { p1:false, p2:false },
-                players: {
-                  p1: { id: targetVal.uid, name: targetVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() },
-                  p2: { id: myId,       name: myName || "P2",       pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() }
-                }
-              });
-              await update(ref(db, `mm/queue/${targetKey}`), { status:"paired", roomId: newRoomId });
-              await update(myTicketRef,                         { status:"paired", roomId: newRoomId });
-              pairedRoomId = newRoomId;
-            }
-          }
+          await update(ref(db, `mm/queue/${candKey}`), { status:"paired", roomId: newRoomId });
+          return { ok:true, roomId: newRoomId };
         }catch(e2){
-          try{ await remove(myTicketRef); }catch(_){}
-          return { ok:false, reason:"PAIRING_FAILED_INDEX_FALLBACK: " + (e2?.message || e2) };
+          return { ok:false, reason:"INDEX_FALLBACK_FAILED: " + (e2?.message || e2) };
         }
-      } else {
-        try{ await remove(myTicketRef); }catch(_){}
-        return { ok:false, reason:"PAIRING_FAILED: " + (err?.message || err) };
       }
+      return { ok:false, reason:"QUERY_ERROR: " + (err?.message || err) };
     }
-
-    if (pairedRoomId){
-      try{ await remove(myTicketRef); }catch(_){}
-      return { ok:true, roomId: pairedRoomId };
-    }
-
-    // 待ちに回る：自分のチケットに roomId が付くのを待つ（10秒でタイムアウト）
-    onStatus("相手が見つかるのを待っています…");
-    return await new Promise((resolve)=>{
-      const tid = setTimeout(async ()=>{
-        try{ await remove(myTicketRef); }catch(_){}
-        resolve({ ok:false, reason: usedFallback ? "TIMEOUT+INDEX_MISSING" : "TIMEOUT" });
-      }, timeoutMs);
-
-      const unsub = onValue(myTicketRef, async (snap)=>{
-        const v = snap.val();
-        if (!v) { clearTimeout(tid); unsub(); resolve({ ok:false, reason:"CANCELLED" }); return; }
-        if (v.roomId){
-          clearTimeout(tid); unsub();
-          const ridFound = v.roomId;
-          try{ await remove(myTicketRef); }catch(_){}
-          resolve({ ok:true, roomId: ridFound });
-        }
-      }, { onlyOnce:false });
-    });
   }
 
   /* [12] ゲーム開始 */
@@ -609,7 +629,6 @@ async function ensureFirebaseAPI(){
 
   /* [14] レンダリング（演出・入力制御） */
   function renderGame(d){
-    // 画面切替
     if (d.state === "lobby"){
       auth?.classList.add("hidden");
       lobby?.classList.remove("hidden");
@@ -633,12 +652,10 @@ async function ensureFirebaseAPI(){
     const endedThisRound = !!(d.lastResult && d.lastResult._round === d.round);
     const revealing      = (d.revealRound === d.round);
 
-    // ロビー表示
     p1Label && (p1Label.textContent = d.players.p1?.name || "-");
     p2Label && (p2Label.textContent = d.players.p2?.name || "-");
     if (btnStart) btnStart.disabled = !(seat==="p1" && d.players.p1?.id && d.players.p2?.id) || d.state!=="lobby";
 
-    // 手札・ボード
     updateCounts(me.hand);
     placeTokens(d.players.p1.pos, d.players.p2.pos, d.boardSize);
     mePosEl && (mePosEl.textContent = seat==="p1" ? d.players.p1.pos : d.players.p2.pos);
@@ -649,18 +666,14 @@ async function ensureFirebaseAPI(){
       (seat==="p1"?d.players.p2.pos:d.players.p1.pos)
     ));
 
-    // 自分の選択は表示、相手は提出済みだけ示す
     meChoiceEl && (meChoiceEl.textContent = toFace(me.choice) || "？");
     opChoiceEl && (opChoiceEl.textContent = opSubmitted ? "⏳" : "？");
 
-    // SWAP使用可否（差が8以上は不可）
     const diff = Math.abs(d.players.p1.pos - d.players.p2.pos);
     const swapBtn = document.querySelector('.cardBtn[data-card="SWAP"]');
 
-    // ラウンド提出ロック
     roundLocked = iSubmitted;
 
-    // 入力可否
     cardBtns.forEach(b=>{
       const k = b.dataset.card;
       const left = me.hand[k]||0;
@@ -672,7 +685,6 @@ async function ensureFirebaseAPI(){
     if (swapBtn) swapBtn.disabled = (me.hand.SWAP<=0) || diff >= 8 || iSubmitted || endedThisRound || revealing || d.state!=="playing";
     if (btnPlay) btnPlay.disabled = !selectedCard || iSubmitted || endedThisRound || revealing || d.state!=="playing";
 
-    // メッセージ
     if (stateMsg){
       if (d.state === "ended"){
         const w = d.lastResult?.winner;
@@ -689,10 +701,8 @@ async function ensureFirebaseAPI(){
       }
     }
 
-    // タイマー
     setupTimer(d.roundStartMs, d.round, me.choice, op.choice, d);
 
-    // 保険：両者提出 → p1 が演出開始
     if (bothSubmitted && seat==="p1" && !revealing && !endedThisRound && d.state==="playing"){
       update(ref(db, `rooms/${roomId}`), {
         revealRound: d.round,
@@ -700,26 +710,17 @@ async function ensureFirebaseAPI(){
       });
     }
 
-    // 結果オーバーレイ（全端末）
     if (endedThisRound && overlayShownRound !== d.round){
       showResultOverlay(makeRoundSummary(d.lastResult, meSeat), RESULT_SHOW_MS);
       overlayShownRound = d.round;
     }
 
-    // 終局：再戦UI
-    if (d.state === "ended"){
-      showRematchOverlay(d);
-    } else {
-      hideRematchOverlay();
-    }
+    if (d.state === "ended"){ showRematchOverlay(d); } else { hideRematchOverlay(); }
 
-    // 次ラウンドで前の結果オーバーレイが残らないよう掃除
-    if (!endedThisRound && !revealing && overlayShownRound !== d.round){
-      hideResultOverlay();
-    }
+    if (!endedThisRound && !revealing && overlayShownRound !== d.round){ hideResultOverlay(); }
   }
 
-  /* [15] 10秒タイマー（★ロビー中は停止） */
+  /* [15] 10秒タイマー */
   function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
     if (localTimer) clearInterval(localTimer);
     lastBeepSec = null;
@@ -755,7 +756,7 @@ async function ensureFirebaseAPI(){
     localTimer = setInterval(tick, 200);
   }
 
-  /* [16] カード選択 */
+  /* [16] カード選択系 */
   function pickCard(code){
     if (roundLocked) return;
     const btn = document.querySelector(`.cardBtn[data-card="${code}"]`);
@@ -805,13 +806,11 @@ async function ensureFirebaseAPI(){
       [`hand/${selectedCard}`]: (me.hand[selectedCard]||0) - 1
     });
 
-    // ローカルロック
     roundLocked = true;
     selectedCard = null;
     cardBtns.forEach(b => { b.classList.remove("selected"); b.disabled = true; });
     if (btnPlay) btnPlay.disabled = true;
 
-    // 両者提出済みなら p1 が演出開始
     await tryStartRevealIfBothReady();
   }
 
@@ -830,12 +829,12 @@ async function ensureFirebaseAPI(){
     }
   }
 
-  /* [18] タイムアウト */
+  /* [18] タイムアウト処理 */
   async function settleTimeout(roomData){
     const d = roomData ?? (await get(ref(db, `rooms/${roomId}`))).val();
     const p1 = d.players.p1, p2 = d.players.p2;
     const a = p1.choice, b = p2.choice;
-    if (a && b) return; // 両者提出済 → 演出ルート
+    if (a && b) return;
 
     let result;
     if (!a && b){ result = winByDefault("p2", b, d); }
@@ -846,7 +845,7 @@ async function ensureFirebaseAPI(){
 
     await applyResult(d, result);
     playResultSfx(result);
-    hideCountdownOverlay(); // 念のため
+    hideCountdownOverlay();
     showResultOverlay(makeRoundSummary(result, seat), RESULT_SHOW_MS);
     scheduleAutoNext(d, RESULT_SHOW_MS);
   }
@@ -873,37 +872,28 @@ async function ensureFirebaseAPI(){
   function judgeRound(p1, p2){
     const a = p1.choice, b = p2.choice;
 
-    // 必勝 vs 必勝 → 引き分け
-    if (a==="WIN" && b==="WIN") {
-      return { type:"win", winner:null, delta:{p1:0,p2:0}, note:"必勝同士" };
-    }
+    if (a==="WIN" && b==="WIN") return { type:"win", winner:null, delta:{p1:0,p2:0}, note:"必勝同士" };
 
-    // バリア vs 必勝/交換（防御側の勝ち、進まない）
     if (a==="BARRIER" && (b==="WIN"||b==="SWAP")) return { type:"barrier", winner:"p1", delta:{p1:0,p2:0}, barrier:true };
     if (b==="BARRIER" && (a==="WIN"||a==="SWAP")) return { type:"barrier", winner:"p2", delta:{p1:0,p2:0}, barrier:true };
 
-    // 通常手に対するバリアのペナルティ（出した側-1）
     if (a==="BARRIER" && (b==="G"||b==="C"||b==="P")) return { type:"barrier-penalty", winner:"p2", delta:{p1:-1,p2:0} };
     if (b==="BARRIER" && (a==="G"||a==="C"||a==="P")) return { type:"barrier-penalty", winner:"p1", delta:{p1:0,p2:-1} };
 
-    // バリア同士
     if (a==="BARRIER" && b==="BARRIER") return { type:"tie", winner:null, delta:{p1:0,p2:0} };
 
-    // 必勝（バリアでない限り+4）
     if (a==="WIN" && b!=="BARRIER") return { type:"win", winner:"p1", delta:{p1:4,p2:0} };
     if (b==="WIN" && a!=="BARRIER") return { type:"win", winner:"p2", delta:{p1:0,p2:4} };
 
-    // 位置交換（差<8のみ）
     if (a==="SWAP" && b!=="BARRIER"){ return { type:"swap", winner:"p1", swap:true }; }
     if (b==="SWAP" && a!=="BARRIER"){ return { type:"swap", winner:"p2", swap:true }; }
     if (a==="SWAP" && b==="SWAP") return { type:"tie", winner:null, delta:{p1:0,p2:0}, note:"ダブルSWAPは相殺" };
 
-    // 通常じゃんけん
     if (isBasic(a) && isBasic(b)){
       if (a===b) return { type:"tie", winner:null, delta:{p1:0,p2:0} };
       const aWin = (a==="G"&&b==="C")||(a==="C"&&b==="P")||(a==="P"&&b==="G");
       if (aWin){ return { type:"rps", winner:"p1", delta:{p1: gain(a), p2:0} }; }
-      else{ return { type:"rps", winner:"p2", delta:{p1:0, p2: gain(b)} }; }
+      return { type:"rps", winner:"p2", delta:{p1:0, p2: gain(b)} };
     }
     return { type:"tie", winner:null, delta:{p1:0,p2:0} };
   }
@@ -986,8 +976,7 @@ async function ensureFirebaseAPI(){
     }, waitMs);
   }
 
-  /* [21] 盤面ヘルパ */
-  const boardEl = $("#board");
+  /* [21] 盤面 */
   function makeBoard(){
     const el = document.getElementById('board');
     if (!el) return;
@@ -1018,14 +1007,13 @@ async function ensureFirebaseAPI(){
       to.className = "token op";
       cells[idx2]?.appendChild(to);
     }
-    // 同マス重なり：左右ズラし
     if (idx1>=0 && idx1===idx2 && tm && to){
       tm.classList.add("overlap-left");
       to.classList.add("overlap-right");
     }
   }
 
-  /* === カウントダウンオーバーレイ === */
+  /* === 結果オーバーレイ === */
   function ensureResultOverlay(){
     if (resultOverlayEl) return resultOverlayEl;
     resultOverlayEl = document.createElement("div");
@@ -1112,7 +1100,7 @@ async function ensureFirebaseAPI(){
     setTimeout(()=>{ countdownOverlayEl.style.display = "none"; }, 180);
   }
 
-  /* === 接続を onValue で待つ（最大 timeoutMs） === */
+  /* === 接続確認 === */
   function waitForConnected(db, timeoutMs = 10000){
     return new Promise(resolve=>{
       const connectedRef = ref(db, ".info/connected");
@@ -1191,9 +1179,9 @@ async function ensureFirebaseAPI(){
   }
   function clampN(x,n){ return Math.max(0, Math.min(n, x)); }
   function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
+  function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
-  // === 結果オーバーレイ（結果専用） ===
-  let resultOverlayEl = null, resultOverlayTimerId = null;
+  // === 結果要約 ===
   function makeRoundSummary(r, mySeat){
     const seatKey = mySeat || (seat==="p1"?"p1":"p2");
     if (r.swap) return "🔁 位置を交換！";
@@ -1225,7 +1213,6 @@ async function ensureFirebaseAPI(){
 
   // === ポーラー ===
   function ensurePollers(){
-    // カウントダウン表示（両端末）
     if (!countdownTicker){
       countdownTicker = setInterval(()=>{
         if (!curRoom) return;
@@ -1239,7 +1226,6 @@ async function ensureFirebaseAPI(){
       }, COUNTDOWN_TICK_MS);
     }
 
-    // p1だけ：演出終了→結果適用→3秒表示→次ラウンド
     if (seat === "p1" && !revealApplyPoller){
       revealApplyPoller = setInterval(async ()=>{
         if (!curRoom) return;
@@ -1261,7 +1247,6 @@ async function ensureFirebaseAPI(){
           }
         }
 
-        // 再戦（両者合意）→新規試合
         if (curRoom.state==="ended"){
           const v = curRoom.rematchVotes || {p1:false,p2:false};
           if (v.p1 && v.p2){
@@ -1311,7 +1296,7 @@ async function ensureFirebaseAPI(){
     if (box) box.style.display = "none";
   }
   async function voteRematch(){
-    const key = seat; // "p1" or "p2"
+    const key = seat;
     await update(ref(db, `rooms/${roomId}/rematchVotes`), { [key]: true });
   }
   async function startNewMatch(){
@@ -1336,6 +1321,5 @@ async function ensureFirebaseAPI(){
     hideResultOverlay();
   }
 
-  /* 小さい補助 */
   function prettyResultTextForLabel(r, mySeat){ return prettyResult(r, mySeat); }
 })();
