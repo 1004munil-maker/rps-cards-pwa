@@ -285,6 +285,117 @@ function enterLobby(){
   });
 }
 
+// === ランダムマッチング11.5 ===
+// 使い方: await startRandomMatch();  → { ok:true, roomId } が返ってきたら enterLobby() へ
+async function startRandomMatch(){
+  // 1) 自分の待機チケットを作成
+  const myTicketRef = push(ref(db, 'mm/queue'));
+  await set(myTicketRef, {
+    uid: myId,
+    name: myName || "GUEST",
+    ts: serverTimestamp(),
+    claimedBy: null,
+    roomId: null,
+    status: "waiting"
+  });
+  // 離脱時は自動削除
+  try{ onDisconnect(myTicketRef).remove(); }catch(_){}
+
+  // 2) 既存待機者を探して奪取（claimedBy=null の誰か）
+  //    ※ limitToFirst(10) くらい拾って自分以外を順にトライ
+  const q = query(ref(db, 'mm/queue'), orderByChild('claimedBy'), equalTo(null), limitToFirst(10));
+  const list = await get(q);
+
+  let pairedRoomId = null;
+  let claimed = false;
+  let targetKey = null, targetVal = null;
+
+  list.forEach(snap=>{
+    if (claimed) return;
+    const v = snap.val(); const k = snap.key;
+    if (!v || v.uid === myId) return; // 自分はスキップ
+    targetKey = k; targetVal = v;
+  });
+
+  if (targetKey){
+    // 2-1) 相手チケットの claimedBy をトランザクションで自分に
+    const claimRef = ref(db, `mm/queue/${targetKey}/claimedBy`);
+    const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
+    if (tx.committed && tx.snapshot.val() === myId){
+      claimed = true;
+      // 3) 自分が部屋を作成して roomId を両者チケットへ書き戻す
+      const newRoomId = rid(6);
+      await set(ref(db, `rooms/${newRoomId}`), {
+        createdAt: serverTimestamp(),
+        state: "lobby",
+        round: 0,
+        minRounds: MIN_ROUNDS,
+        boardSize: BOARD_SIZE,
+        roundStartMs: null,
+        lastResult: null,
+        revealRound: null,
+        revealUntilMs: null,
+        rematchVotes: { p1:false, p2:false },
+        players: {
+          // 待ってた人をP1、自分をP2にしておく（あとで座席は自動判定するからOK）
+          p1: { id: targetVal.uid, name: targetVal.name || "P1", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() },
+          p2: { id: myId,       name: myName || "P2",       pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp() }
+        }
+      });
+      // roomId を通知
+      await update(ref(db, `mm/queue/${targetKey}`), { status:"paired", roomId: newRoomId });
+      await update(myTicketRef,                         { status:"paired", roomId: newRoomId });
+      pairedRoomId = newRoomId;
+    }
+  }
+
+  if (pairedRoomId){
+    // 自分が作ったケース：自分のチケットは消してOK（相手のは相手側で消える）
+    try{ await remove(myTicketRef); }catch(_){}
+    return { ok:true, roomId: pairedRoomId };
+  }
+
+  // 4) 誰もいない or 奪取失敗 → 「自分のチケットが他人にclaimed」されるのを待つ
+  return await new Promise((resolve)=>{
+    const unsub = onValue(myTicketRef, async (snap)=>{
+      const v = snap.val();
+      if (!v) { // キャンセル等で消えた
+        unsub(); resolve({ ok:false, reason:"CANCELLED" }); return;
+      }
+      if (v.roomId){
+        // 相手が部屋を作ってくれた
+        const ridFound = v.roomId;
+        unsub();
+        try{ await remove(myTicketRef); }catch(_){}
+        resolve({ ok:true, roomId: ridFound });
+      }
+    }, { onlyOnce:false });
+  });
+}
+
+const btnRandom = document.querySelector('#btnRandom');
+if (btnRandom) btnRandom.onclick = async ()=>{
+  sfx.click();
+  const name = (playerName.value || "").trim();
+  if (!name){ alert("名前を入力してね"); playerName.focus(); return; }
+  myName = name;
+
+  // マッチ開始
+  const r = await startRandomMatch();
+  if (!r.ok){ alert("マッチングに失敗しました。再試行してね。"); return; }
+
+  // 取得した roomId へ入室。座席はplayersのidを見て自動で決める
+  roomId = r.roomId;
+
+  const snap = await get(ref(db, `rooms/${roomId}`));
+  if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
+  const d = snap.val();
+  seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
+
+  enterLobby(); // 既存のロビー購読が走る
+};
+
+
 /* [12] ゲーム開始 */
 async function startGame(){
   const snap = await get(child(ref(db), `rooms/${roomId}`));
