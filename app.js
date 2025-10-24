@@ -517,14 +517,12 @@ async function ensureAnonAuth(app){
     let myTicketRef = null;
     try{
       myTicketRef = push(ref(db, "mm/queue"));
-      await set(myTicketRef, {
-        uid: authUid,
-        name: (myName || "GUEST").slice(0,20),
-        ts: serverTimestamp(),
-        claimedBy: null,
-        roomId: null,
-        status: "waiting"
-      });
+  await set(myTicketRef, {
+      uid: authUid,
+      name: (myName || "GUEST").slice(0,20),
+      ts: serverTimestamp(),
+      status: "waiting"
+});
       try{ onDisconnect(myTicketRef).remove(); }catch(_){}
     }catch(err){
       return { ok:false, reason:"QUEUE_WRITE_DENIED: " + (err?.message || err) };
