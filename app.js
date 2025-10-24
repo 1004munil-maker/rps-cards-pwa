@@ -244,37 +244,33 @@ async function ensureFirebaseAPI(){
   if (btnPlay) btnPlay.onclick = () => { sfx.play(); submitCard(); };
 
   // ランダムマッチ
-  if (btnRandom) btnRandom.onclick = async ()=>{
-    try{
-      sfx.click();
-      const name = (playerName.value || "").trim();
-      if (!name){ alert("名前を入力してね"); playerName.focus(); return; }
-      myName = name;
+if (btnRandom) btnRandom.onclick = async ()=>{
+  try{
+    sfx.click();
+    const name = (playerName.value || "").trim();
+    if (!name){ alert("名前を入力してね"); playerName.focus(); return; }
+    myName = name;
 
-      // 接続確認（RTDB推奨の/.info/connected）
-      const connSnap = await get(ref(db, ".info/connected")).catch(()=>null);
-      if (!connSnap || connSnap.val() !== true){
-        alert("ネットワークに接続できません（/.info/connected=false）。回線を確認して再試行してね。");
-        return;
-      }
+    // ✅ 接続は onValue で“最大10秒待つ”。未確定でも続行（アラートは出さない）
+    await waitForConnected(db, 10000);
 
-      const r = await startRandomMatch();
-      if (!r.ok){
-        alert("マッチングに失敗しました：" + (r.reason || "unknown"));
-        return;
-      }
-
-      roomId = r.roomId;
-      const snap = await get(ref(db, `rooms/${roomId}`));
-      if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
-      const d = snap.val();
-      seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
-      enterLobby();
-    }catch(err){
-      console.error("randomMatch error:", err);
-      alert("マッチング中にエラーが発生しました：" + (err?.message || err));
+    const r = await startRandomMatch();
+    if (!r.ok){
+      alert("マッチングに失敗しました：" + (r.reason || "unknown"));
+      return;
     }
-  };
+
+    roomId = r.roomId;
+    const snap = await get(ref(db, `rooms/${roomId}`));
+    if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
+    const d = snap.val();
+    seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
+    enterLobby();
+  }catch(err){
+    console.error("randomMatch error:", err);
+    alert("マッチング中にエラーが発生しました：" + (err?.message || err));
+  }
+};
 
   /* [09] 対戦前の広告（ネイティブ時のみ） */
   async function maybeAdThenStart(){
@@ -938,6 +934,28 @@ async function ensureFirebaseAPI(){
       to.classList.add("overlap-right");
     }
   }
+
+   // RTDB 接続を onValue で待つ（最大 timeoutMs）。true/false を返す。
+// 注意: file:// 実行や初回WS張り直し中は false のままでもあり得るので、呼び出し側で“続行”判断にする。
+function waitForConnected(db, timeoutMs = 3000){
+  return new Promise(resolve=>{
+    const connectedRef = ref(db, ".info/connected");
+    let settled = false;
+    const to = setTimeout(()=>{
+      if (!settled){ settled = true; off?.(); resolve(false); }
+    }, timeoutMs);
+
+    const off = onValue(connectedRef, snap=>{
+      const v = !!snap.val();
+      if (v && !settled){
+        settled = true;
+        clearTimeout(to);
+        off?.();
+        resolve(true);
+      }
+    });
+  });
+}
 
   /* [22] ユーティリティ */
   function randomBasicHand(){
