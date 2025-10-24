@@ -357,6 +357,18 @@ ins.adsbygoogle{ display:block !important; width:100% !important; max-width:100%
   .cell.goal{ box-shadow:inset 0 0 0 3px #ff79b4, 0 0 0 2px rgba(255,121,180,.18); }
 }
 
+/* 例: 盤面のゴールセル */
+.cell.goal::after{
+  content: "GOAL";
+  font-size: 10px;   /* ←ここを小さく */
+  letter-spacing: .5px;
+  opacity: .8;
+  position: absolute;
+  bottom: 4px; left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
 /* ============ 動きが苦手な人向け ============ */
 @media (prefers-reduced-motion: reduce){
   *{ animation:none !important; transition:none !important; }
