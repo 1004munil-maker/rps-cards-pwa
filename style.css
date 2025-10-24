@@ -29,12 +29,12 @@
   --card-r: 16px;
 
   /* Board tokens */
-  --token-size: 44%;
+  --token-size: 44%6
   --ol-shift: 10%;
   --ol-shift-goal: 7%;
 
   /* GOAL ラベル（中央＆少し小さめ） */
-  --goal-size: 9.5px;
+  --goal-size: 8px;
   --goal-weight: 900;
   --goal-opacity: .9;
 }
@@ -43,7 +43,7 @@
     --token-size: 42%;
     --ol-shift: 8%;
     --ol-shift-goal: 6%;
-    --goal-size: 9px;
+    --goal-size: 7px;
   }
 }
 
