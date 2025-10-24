@@ -749,31 +749,32 @@ function makeBoard(){
 }
 function placeTokens(p1, p2, size){
   const cells = [...boardEl.children];
+  // 既存トークンを掃除
   cells.forEach(c=>{
     c.querySelector(".token.me")?.remove();
     c.querySelector(".token.op")?.remove();
   });
-  const idx1 = Math.min(size, Math.max(0,p1)) - 1;
-  const idx2 = Math.min(size, Math.max(0,p2)) - 1;
 
+  // インデックス算出（0-based）
+  const idx1 = Math.min(size, Math.max(0, p1)) - 1;
+  const idx2 = Math.min(size, Math.max(0, p2)) - 1;
+
+  let tm=null, to=null;
   if (idx1>=0){
-    const t1 = document.createElement("div");
-    t1.className = "token me";
-    cells[idx1]?.appendChild(t1);
+    tm = document.createElement("div");
+    tm.className = "token me";
+    cells[idx1]?.appendChild(tm);
   }
   if (idx2>=0){
-    const t2 = document.createElement("div");
-    t2.className = "token op";
-    cells[idx2]?.appendChild(t2);
+    to = document.createElement("div");
+    to.className = "token op";
+    cells[idx2]?.appendChild(to);
   }
-  // 同マス重なり対処：左右にズラして必ず2色が見える
-  if (idx1>=0 && idx1===idx2){
-    const cell = cells[idx1];
-    cell.style.position = "relative";
-    const tm = cell.querySelector(".token.me");
-    const to = cell.querySelector(".token.op");
-    if (tm){ tm.style.position="relative"; tm.style.transform="translateX(-8px)"; tm.style.zIndex="2"; }
-    if (to){ to.style.position="relative"; to.style.transform="translateX(8px)";  to.style.zIndex="1"; }
+
+  // 同マス重なり：左右にクラス付与（CSSで%オフセット）
+  if (idx1>=0 && idx1===idx2 && tm && to){
+    tm.classList.add("overlap-left");  // 自分を左（上）に
+    to.classList.add("overlap-right"); // 相手を右（下）に
   }
 }
 
