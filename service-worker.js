@@ -1,5 +1,5 @@
 // service-worker.js
-const CACHE_NAME = 'rps-cards-v1.0.9'; // ← リリース毎に上げる
+const CACHE_NAME = 'rps-cards-v1.1.0'; // ← リリース毎に上げる
 const APP_SHELL = [
   './',
   './index.html',
