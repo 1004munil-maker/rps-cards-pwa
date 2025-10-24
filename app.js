@@ -1,29 +1,31 @@
 /* =========================================================
-   RPS Cards — app.js（安定版 / ランダム対戦＋精密タイマー＋再実行OK）
+   RPS Cards — app.js（安定版 / キャンセル完全対応・世代トークン化）
    変更点サマリ
-   [00] 依存の動的importを堅牢化（RTDB off も含める）
-   [01] モバイル系の誤タップ防止＆画面縦固定
-   [02] SFX（効果音）
-   [03] Firebase初期化（CDN import → initializeApp → getDatabase）
+   [00] 依存の動的import（off 追加）
+   [01] モバイル安全化
+   [02] 効果音
+   [03] Firebase初期化
    [04] DOMキャッシュ
-   [05] オーバーレイ（結果・カウントダウン・マッチング）／Match管理
-   [06] 定数（ルール/時間）
-   [07] 状態（プレイヤー／ルーム／タイマー）
+   [05] オーバーレイ（結果・カウントダウン・マッチング）
+   [05.5] Match管理（世代トークン / 完全キャンセル / 再実行OK）
+   [06] 定数
+   [07] 状態
    [08] 盤面生成
-   [09] イベント束ね（作成/参加/コピー/開始/退出/カード/ランダム）
-   [10] ルーム作成・参加・ロビー購読
-   [11] 描画（UIの一括更新）
-   [12] 精密10秒タイマー（秒飛びゼロ）
+   [09] UIイベント
+   [10] ルーム作成/参加/購読
+   [11] レンダリング
+   [12] 精密10秒タイマー
    [13] カード選択～提出
-   [14] タイムアウト処理／判定ルール／SFX出力
-   [15] 結果適用→自動ラウンド遷移
-   [16] 補助（手札生成/表記/数値処理/待機）
-   [17] ポーリング（判定終了→結果→次R・再戦）
+   [14] タイムアウト/判定/SFX
+   [15] 結果適用→次R
+   [16] 補助（手札・表記・カウントダウン・接続）
+   [17] ポーラー
    [18] 再戦UI
-   [19] ランダム対戦内部（奪取・待機票）
+   [19] ランダム対戦内部（奪取・待機票 / キャンセル時の全ロールバック）
+   [20] ゲーム開始/退出/広告
    ========================================================= */
 
-/* [00] Firebase import（必要関数を揃える／CDNから動的読込） */
+/* [00] Firebase import */
 async function ensureFirebaseAPI(){
   const need = [
     "initializeApp","getDatabase","ref","onValue","off","set","update","get","child",
@@ -75,7 +77,7 @@ async function ensureFirebaseAPI(){
   document.addEventListener('wheel', e => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
   (async () => { try { if (screen.orientation?.lock) await screen.orientation.lock('portrait'); } catch(_) {} })();
 
-  /* [02] 効果音（SFX） */
+  /* [02] SFX */
   class SFX {
     constructor(){ this.ctx=null; this.enabled=true; }
     ensure(){ if(!this.ctx){ const AC=window.AudioContext||window.webkitAudioContext; if(AC) this.ctx=new AC(); } if(this.ctx&&this.ctx.state==='suspended') this.ctx.resume(); }
@@ -143,7 +145,7 @@ async function ensureFirebaseAPI(){
   const minRoundsEl= $("#minRounds");
   const timerEl    = $("#timer");
   const diffEl     = $("#diff");
-  const boardEl    = $("#board"); // ← 重複定義しない！
+  const boardEl    = $("#board");
   const mePosEl    = $("#mePos");
   const opPosEl    = $("#opPos");
   const stateMsg   = $("#stateMsg");
@@ -156,7 +158,7 @@ async function ensureFirebaseAPI(){
   const cardBtns   = [...document.querySelectorAll(".cardBtn")];
   const cntG       = $("#cntG"), cntC=$("#cntC"), cntP=$("#cntP"), cntWIN=$("#cntWIN"), cntSWAP=$("#cntSWAP"), cntBARRIER=$("#cntBARRIER");
 
-  /* [05] オーバーレイ（結果・カウントダウン・マッチング）＆ Match管理 */
+  /* [05] オーバーレイ：結果・カウントダウン・マッチング */
   let resultOverlayEl = null, resultOverlayTimerId = null;
   function ensureResultOverlay(){
     if (resultOverlayEl) return resultOverlayEl;
@@ -289,17 +291,27 @@ async function ensureFirebaseAPI(){
     setTimeout(()=>{ matchOverlayEl.style.display = "none"; }, 180);
   }
 
-  // Match管理（キャンセル・再実行可／残骸を必ず消す）
+  /* [05.5] Match管理（世代トークン） */
   const Match = {
     active:false, cancelled:false,
+    generation:0, // ← クリック毎に++。古いrunの結果は全無効化
     ticketRef:null, onTicket:null, _onRef:null,
     timeoutId:null, tickCancel:null,
-    async reset(){
+
+    startRun(){
+      // 新規run開始：前runのtick停止
+      this.generation += 1;
       this.cancelled = false;
+      this.active = true;
+      if (typeof this.tickCancel === "function"){ this.tickCancel(); this.tickCancel = null; }
+      if (this.timeoutId){ clearTimeout(this.timeoutId); this.timeoutId = null; }
+      return this.generation;
+    },
+    async resetIf(gen){
+      if (gen !== this.generation) return; // 新しいrunが始まっていたら触らない
+      // 待機票の後始末
       if (this.timeoutId){ clearTimeout(this.timeoutId); this.timeoutId = null; }
       if (typeof this.tickCancel === "function"){ this.tickCancel(); this.tickCancel = null; }
-
-      // チケットは status を cancelled にしてから削除（他端末奪取の対象外に）
       if (this.ticketRef){
         try{ await update(this.ticketRef, { status:"cancelled" }); }catch(_){}
         try{ await remove(this.ticketRef); }catch(_){}
@@ -312,16 +324,15 @@ async function ensureFirebaseAPI(){
 
       hideMatchOverlay();
       this.active = false;
-      guardNameButtons();
     },
     async cancel(){
       if (!this.active) return;
       this.cancelled = true;
-      await this.reset();
+      await this.resetIf(this.generation);
     }
   };
 
-  /* [06] 定数（ルール/時間） */
+  /* [06] 定数 */
   const BOARD_SIZE = 20;
   const MIN_ROUNDS = 8;
   const TURN_TIME  = 10_000;
@@ -337,7 +348,6 @@ async function ensureFirebaseAPI(){
   let roomId = "";
   let seat = ""; // "p1" or "p2"
 
-  // onValue購読解除用（RTDBは off を使う）
   let roomRefObj = null;
   let roomListener = null;
 
@@ -350,8 +360,7 @@ async function ensureFirebaseAPI(){
   let revealApplyPoller = null;
   let countdownTicker = null;
 
-  // タイマー停止ハンドラ（精密タイマーは関数を返す）
-  let localTimer = null;
+  let localTimerStopper = null; // 精密タイマー停止用
 
   /* [08] 盤面生成 */
   function makeBoard(){
@@ -366,7 +375,7 @@ async function ensureFirebaseAPI(){
   }
   makeBoard();
 
-  /* [09] イベント */
+  /* [09] UIイベント */
   function guardNameButtons(){
     const ok = !!playerName?.value?.trim();
     const busy = Match.active === true;
@@ -436,8 +445,7 @@ async function ensureFirebaseAPI(){
       if (!name){ alert("名前を入力してね"); playerName.focus(); return; }
       myName = name;
 
-      await Match.reset();
-      Match.active = true;
+      const gen = Match.startRun();
       guardNameButtons();
 
       const TOTAL_MS = 40000;
@@ -449,14 +457,14 @@ async function ensureFirebaseAPI(){
       });
 
       await waitForConnected(db, 2000);
-      if (Match.cancelled) return;
+      if (Match.cancelled || gen !== Match.generation) return;
 
-      // ① 最初の10秒だけ既存待機者を毎秒奪取（UIは変えない）
+      // ① 最初の10秒：既存待機者を毎秒奪取（UIは変えない）
       const claimUntil = Date.now() + 10000;
-      while(!Match.cancelled && Date.now() < claimUntil){
-        const r = await tryClaimOne();
-        if (r.ok){
-          await Match.reset();
+      while(!Match.cancelled && gen === Match.generation && Date.now() < claimUntil){
+        const r = await tryClaimOne({ gen });
+        if (r.ok && gen === Match.generation && !Match.cancelled){
+          await Match.resetIf(gen);
           roomId = r.roomId;
           const snap = await get(ref(db, `rooms/${roomId}`));
           if (!snap.exists()){ alert("部屋が見つかりませんでした"); return; }
@@ -467,12 +475,18 @@ async function ensureFirebaseAPI(){
         }
         await sleep(1000);
       }
-      if (Match.cancelled) return;
+      if (Match.cancelled || gen !== Match.generation) return;
 
-      // ② 残り時間で自分の待機票を作成して待機（UIはそのまま）
-      const waitRes = await enqueueAndWait({ deadlineAt: endAt });
-      await Match.reset();
-      if (!waitRes.ok){ alert("いまは相手がいませんでした。また後でお試しください。"); return; }
+      // ② 残り時間：自分の待機票を作成→待機（UIはそのまま）
+      const waitRes = await enqueueAndWait({ deadlineAt: endAt, gen });
+      await Match.resetIf(gen);
+      if (Match.cancelled || gen !== Match.generation) return;
+
+      if (!waitRes.ok){
+        // 40秒満了（TIMEOUT）のみメッセージ、キャンセル/その他は無言
+        if (waitRes.reason === "TIMEOUT"){ alert("いまは相手がいませんでした。また後でお試しください。"); }
+        return;
+      }
 
       roomId = waitRes.roomId;
       const snap = await get(ref(db, `rooms/${roomId}`));
@@ -481,13 +495,15 @@ async function ensureFirebaseAPI(){
       seat = (d.players?.p1?.id === myId) ? "p1" : "p2";
       enterLobby();
     }catch(err){
-      await Match.reset();
+      await Match.resetIf(Match.generation);
       console.error("randomMatch error:", err);
       alert("マッチング中にエラー：" + (err?.message || err));
+    } finally {
+      guardNameButtons();
     }
   };
 
-  /* [10] ルーム作成/参加/ロビー購読 */
+  /* [10] ルーム作成/参加/購読 */
   async function createRoom(id, name){
     await set(ref(db, `rooms/${id}`), {
       createdAt: serverTimestamp(),
@@ -529,7 +545,6 @@ async function ensureFirebaseAPI(){
     lobby?.classList.remove("hidden");
     if (roomIdLabel) roomIdLabel.textContent = roomId;
 
-    // 既存購読を解除
     if (roomRefObj && roomListener){ try{ off(roomRefObj, 'value', roomListener); }catch(_){ } }
     roomRefObj = ref(db, `rooms/${roomId}`);
     roomListener = (snap)=>{
@@ -635,9 +650,9 @@ async function ensureFirebaseAPI(){
     if (!endedThisRound && !revealing && overlayShownRound !== d.round){ hideResultOverlay(); }
   }
 
-  /* [12] 精密10秒タイマー（秒飛び防止） */
+  /* [12] 精密10秒タイマー */
   function setupTimer(roundStartMs, round, myChoice, opChoice, roomData){
-    if (typeof localTimer === "function"){ localTimer(); } // 以前のタイマー停止
+    if (typeof localTimerStopper === "function"){ localTimerStopper(); }
     lastBeepSec = null;
 
     if (roomData?.state !== "playing"){ if (timerEl) timerEl.textContent = "-"; return; }
@@ -650,7 +665,7 @@ async function ensureFirebaseAPI(){
     }
 
     const deadline = (roundStartMs || Date.now()) + TURN_TIME;
-    localTimer = preciseSecCountdown(
+    localTimerStopper = preciseSecCountdown(
       deadline,
       (sec)=>{
         if (timerEl) timerEl.textContent = String(sec);
@@ -738,12 +753,12 @@ async function ensureFirebaseAPI(){
     }
   }
 
-  /* [14] タイムアウト／判定／SFX */
+  /* [14] タイムアウト/判定/SFX */
   async function settleTimeout(roomData){
     const d = roomData ?? (await get(ref(db, `rooms/${roomId}`))).val();
     const p1 = d.players.p1, p2 = d.players.p2;
     const a = p1.choice, b = p2.choice;
-    if (a && b) return; // 両者提出済 → 演出ルート
+    if (a && b) return;
 
     let result;
     if (!a && b){ result = winByDefault("p2", b, d); }
@@ -814,7 +829,7 @@ async function ensureFirebaseAPI(){
     }
   }
 
-  /* [15] 結果適用→自動次R */
+  /* [15] 結果適用→次R */
   async function applyResult(d, r){
     if (d.lastResult && d.lastResult._round === d.round) return;
 
@@ -934,7 +949,7 @@ async function ensureFirebaseAPI(){
   function rid(n=6){ const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from({length:n},()=>A[Math.floor(Math.random()*A.length)]).join(""); }
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
-  // 秒飛びゼロの精密カウントダウン（次の秒境界に合わせて待つ）
+  // 秒境界同期カウントダウン（秒飛び抑止）
   function preciseSecCountdown(deadlineMs, onTick, onZero){
     let stopped = false;
     function loop(){
@@ -943,10 +958,7 @@ async function ensureFirebaseAPI(){
       const remain = Math.max(0, deadlineMs - now);
       const sec = Math.floor((remain + 999) / 1000);
       onTick(sec);
-      if (remain <= 0){
-        if (onZero) onZero();
-        return;
-      }
+      if (remain <= 0){ if (onZero) onZero(); return; }
       const next = remain % 1000 || 1000;
       setTimeout(loop, next);
     }
@@ -954,7 +966,7 @@ async function ensureFirebaseAPI(){
     return ()=>{ stopped = true; };
   }
 
-  // RTDB 接続（.info/connected）を最大timeoutMs待ってみる（未接続でも続行は可能）
+  // RTDB 接続を最大timeoutMs待つ（未接続でも続行可能）
   function waitForConnected(db, timeoutMs = 10000){
     return new Promise(resolve=>{
       const connectedRef = ref(db, ".info/connected");
@@ -975,7 +987,6 @@ async function ensureFirebaseAPI(){
     });
   }
 
-  // ラウンド結果の要約（自分視点テキスト）
   function makeRoundSummary(r, mySeat){
     const seatKey = mySeat || (seat==="p1"?"p1":"p2");
     if (r.swap) return "🔁 位置を交換！";
@@ -1007,7 +1018,6 @@ async function ensureFirebaseAPI(){
 
   /* [17] ポーラー */
   function ensurePollers(){
-    // カウントダウン数字表示（双方）
     if (!countdownTicker){
       countdownTicker = setInterval(()=>{
         if (!curRoom) return;
@@ -1021,7 +1031,6 @@ async function ensureFirebaseAPI(){
       }, 250);
     }
 
-    // p1側：演出→結果→次R／再戦成立→自動新規
     if (seat === "p1" && !revealApplyPoller){
       revealApplyPoller = setInterval(async ()=>{
         if (!curRoom) return;
@@ -1115,13 +1124,13 @@ async function ensureFirebaseAPI(){
     hideResultOverlay();
   }
 
-  /* [19] ランダム対戦内部（奪取・待機票） */
+  /* [19] ランダム対戦内部（奪取・待機票 / 完全キャンセル対応） */
   function isMissingIndexError(err){
     const s = String(err?.message || err || "");
     return /index\s*not\s*defined|\.indexOn/i.test(s);
   }
 
-  async function enqueueAndWait({ deadlineAt } = {}){
+  async function enqueueAndWait({ deadlineAt, gen } = {}){
     let myTicketRef = null;
     try{
       myTicketRef = push(ref(db, 'mm/queue'));
@@ -1142,6 +1151,7 @@ async function ensureFirebaseAPI(){
     return await new Promise((resolve)=>{
       const msLeft = Math.max(0, (deadlineAt||0) - Date.now());
       Match.timeoutId = setTimeout(async ()=>{
+        if (gen !== Match.generation) return;
         try{ await update(myTicketRef, { status:"timeout" }); }catch(_){}
         try{ await remove(myTicketRef); }catch(_){}
         resolve({ ok:false, reason:"TIMEOUT" });
@@ -1149,6 +1159,10 @@ async function ensureFirebaseAPI(){
 
       const onTicket = async (snap)=>{
         const v = snap.val();
+        if (gen !== Match.generation){
+          try{ off(myTicketRef, 'value', onTicket); }catch(_){}
+          return;
+        }
         if (!v){
           if (Match.timeoutId){ clearTimeout(Match.timeoutId); Match.timeoutId = null; }
           off(myTicketRef, 'value', onTicket);
@@ -1168,9 +1182,12 @@ async function ensureFirebaseAPI(){
     });
   }
 
-  async function tryClaimOne(){
+  async function tryClaimOne({ gen } = {}){
+    // gen / cancelled チェック
+    if (Match.cancelled || gen !== Match.generation) return { ok:false, reason:"CANCELLED" };
+
     try{
-      // status==='waiting' のみ対象（キャンセル済みを拾わない）
+      // status === 'waiting' のみ対象
       const q = query(ref(db, 'mm/queue'), orderByChild('status'), equalTo('waiting'), limitToFirst(50));
       const list = await get(q);
 
@@ -1183,13 +1200,29 @@ async function ensureFirebaseAPI(){
       });
       arr.sort((a,b)=> (a.v.ts||0) - (b.v.ts||0));
       if (!arr.length) return { ok:false, reason:"EMPTY" };
+      if (Match.cancelled || gen !== Match.generation) return { ok:false, reason:"CANCELLED" };
 
       const candKey = arr[0].k; const candVal = arr[0].v;
+
+      // 奪取（TX）
       const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
       const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
       if (!(tx.committed && tx.snapshot.val() === myId)) return { ok:false, reason:"LOST_RACE" };
 
+      // 奪取後のキャンセル → 奪取を解放して撤退
+      if (Match.cancelled || gen !== Match.generation){
+        await runTransaction(claimRef, cur => (cur===myId ? null : cur));
+        return { ok:false, reason:"CANCELLED_AFTER_CLAIM" };
+      }
+
       const newRoomId = rid(6);
+
+      // 部屋作成前にも一応確認
+      if (Match.cancelled || gen !== Match.generation){
+        await runTransaction(claimRef, cur => (cur===myId ? null : cur));
+        return { ok:false, reason:"CANCELLED_BEFORE_ROOM" };
+      }
+
       await set(ref(db, `rooms/${newRoomId}`), {
         createdAt: serverTimestamp(),
         state: "lobby",
@@ -1206,11 +1239,19 @@ async function ensureFirebaseAPI(){
           p2: { id: myId,       name: myName    || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false }
         }
       });
+
+      // 作成直後のキャンセル → 部屋を消し、奪取も解放
+      if (Match.cancelled || gen !== Match.generation){
+        try{ await remove(ref(db, `rooms/${newRoomId}`)); }catch(_){}
+        await runTransaction(claimRef, cur => (cur===myId ? null : cur));
+        return { ok:false, reason:"CANCELLED_AFTER_ROOM" };
+      }
+
       await update(ref(db, `mm/queue/${candKey}`), { status:"paired", roomId: newRoomId });
       return { ok:true, roomId: newRoomId };
 
     }catch(err){
-      // インデックス無し環境向けフォールバック
+      // インデックス無し環境のフォールバック（同様にキャンセル判定）
       try{
         const allSnap = await get(ref(db, 'mm/queue'));
         const all = allSnap.exists() ? allSnap.val() : {};
@@ -1218,13 +1259,25 @@ async function ensureFirebaseAPI(){
           .filter(([k,v])=> v && v.uid !== myId && v.claimedBy == null && v.status === 'waiting')
           .sort((a,b)=> ((a[1].ts||0) - (b[1].ts||0)));
         if (!arr.length) return { ok:false, reason:"EMPTY" };
+        if (Match.cancelled || gen !== Match.generation) return { ok:false, reason:"CANCELLED" };
 
         const [candKey, candVal] = arr[0];
         const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
         const tx = await runTransaction(claimRef, cur => (cur===null ? myId : cur));
         if (!(tx.committed && tx.snapshot.val() === myId)) return { ok:false, reason:"LOST_RACE" };
 
+        if (Match.cancelled || gen !== Match.generation){
+          await runTransaction(claimRef, cur => (cur===myId ? null : cur));
+          return { ok:false, reason:"CANCELLED_AFTER_CLAIM" };
+        }
+
         const newRoomId = rid(6);
+
+        if (Match.cancelled || gen !== Match.generation){
+          await runTransaction(claimRef, cur => (cur===myId ? null : cur));
+          return { ok:false, reason:"CANCELLED_BEFORE_ROOM" };
+        }
+
         await set(ref(db, `rooms/${newRoomId}`), {
           createdAt: serverTimestamp(),
           state: "lobby",
@@ -1241,10 +1294,19 @@ async function ensureFirebaseAPI(){
             p2: { id: myId,       name: myName    || "P2", pos:0, choice:null, hand: randomHand(), joinedAt: serverTimestamp(), ready:false }
           }
         });
+
+        if (Match.cancelled || gen !== Match.generation){
+          try{ await remove(ref(db, `rooms/${newRoomId}`)); }catch(_){}
+          await runTransaction(claimRef, cur => (cur===myId ? null : cur));
+          return { ok:false, reason:"CANCELLED_AFTER_ROOM" };
+        }
+
         await update(ref(db, `mm/queue/${candKey}`), { status:"paired", roomId: newRoomId });
         return { ok:true, roomId: newRoomId };
+
       }catch(e2){
-        return { ok:false, reason: isMissingIndexError(err) ? ("INDEX_FALLBACK_FAILED: " + (e2?.message || e2)) : ("QUERY_ERROR: " + (err?.message || err)) };
+        const msg = isMissingIndexError(err) ? ("INDEX_FALLBACK_FAILED: " + (e2?.message || e2)) : ("QUERY_ERROR: " + (err?.message || err));
+        return { ok:false, reason: msg };
       }
     }
   }
@@ -1305,7 +1367,6 @@ async function ensureFirebaseAPI(){
       if (btnExit)  btnExit.disabled  = true;
 
       if (!roomId){
-        // ロビー購読解除
         if (roomRefObj && roomListener){ try{ off(roomRefObj, 'value', roomListener); }catch(_){ } }
         location.reload();
         return;
