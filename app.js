@@ -1,13 +1,10 @@
 /* =========================================================
-   RPS Cards — app.js (CLEAN FINAL, rules-aligned)
-   - ランダムマッチ2回目以降OK（UI完全復帰）
-   - 相手退室は「居た→いなくなった」時のみ発火（新規作成直後は出さない）
-   - 手動参加は players/p2 の最小更新のみ（ルール準拠）
-   - Ready→3,2,1→「ゲームスタート！」（36px）
-   - スタンプ維持
-   - p2 退室時は上位フィールドを書かない（rules 準拠）
-   - judgeRound のバリア判定バグ修正
-   - ensurePollers を1本化
+   RPS Cards — app.js (FINAL)
+   - 両者Ready→3,2,1→自動開始（サーバ時刻基準で確実起動）
+   - ランダム対戦：2回目以降も必ず動く（UI/タイマー完全初期化）
+   - 部屋作成/入室は従来ルール準拠（players/p2 の最小更新）
+   - スタンプ：既存 #btnStamp を確実にバインド
+   - Barrier 判定の条件式バグ修正
    ========================================================= */
 
 /* ========== Firebase import 安全化 ========== */
@@ -122,6 +119,14 @@ async function ensureAnonAuth(app){
   const authFB = await ensureAnonAuth(app);
   const authUid = authFB.currentUser?.uid;
 
+  /* サーバ時刻オフセット（pre-startをサーバ時刻基準で） */
+  let serverOffsetMs = 0;
+  onValue(ref(db, ".info/serverTimeOffset"), snap=>{
+    const v = snap.val();
+    serverOffsetMs = (typeof v === "number") ? v : 0;
+  });
+  const serverNow = () => Date.now() + serverOffsetMs;
+
   /* [04] DOM */
   const $ = s => document.querySelector(s);
   const playerName = $("#playerName");
@@ -216,7 +221,7 @@ async function ensureAnonAuth(app){
   let overallMatchCountdown = null;
   let matchSession = 0;
 
-  // 相手退室誤検知防止（前回の状態）
+  // 相手退室誤検知防止
   let prevOpUid = null;
 
   /* [07] 初期盤面 */
@@ -369,8 +374,13 @@ async function ensureAnonAuth(app){
 
   // ===== ランダム対戦（40秒） =====
   if (btnRandom) btnRandom.onclick = async ()=>{
-    if (isMatching) return;
-    const mySession = ++matchSession;
+    // 旧セッションの掃除＆新規セッション開始
+    matchSession++;
+    const mySession = matchSession;
+
+    // 念のためUI初期化
+    stopOverallMatchCountdown();
+    hideMatchOverlay();
 
     try{
       sfx.click();
@@ -451,7 +461,8 @@ async function ensureAnonAuth(app){
     await set(ref(db, `rooms/${id}`), {
       createdAt: serverTimestamp(),
       state: "lobby",
-      preStartUntilMs: null,
+      preStartAt: null,
+      preStartDurationMs: null,
       round: 0,
       minRounds: MIN_ROUNDS,
       boardSize: BOARD_SIZE,
@@ -512,7 +523,7 @@ async function ensureAnonAuth(app){
     });
   }
 
-  /* ======== Ready→3,2,1→開始 ======== */
+  /* ======== Ready→3,2,1（サーバ時刻基準）→開始 ======== */
   async function startPreStartCountdown(){
     if (seat !== "p1") return;
     const snap = await get(ref(db, `rooms/${roomId}`));
@@ -525,7 +536,8 @@ async function ensureAnonAuth(app){
 
     await update(ref(db, `rooms/${roomId}`), {
       state: "preparing",
-      preStartUntilMs: Date.now() + 3000
+      preStartAt: serverTimestamp(),
+      preStartDurationMs: 3000
     });
   }
 
@@ -624,7 +636,6 @@ async function ensureAnonAuth(app){
       if (arr.length){ candKey = arr[0].k; candVal = arr[0].v; }
       if (!candKey) return { ok:false, reason:"EMPTY" };
 
-      // ルールに沿った claimedBy のトランザクション
       const claimRef = ref(db, `mm/queue/${candKey}/claimedBy`);
       const tx = await runTransaction(claimRef, cur => (cur===null ? authUid : cur));
       if (!(tx.committed && tx.snapshot.val() === authUid)) return { ok:false, reason:"LOST_RACE" };
@@ -636,7 +647,8 @@ async function ensureAnonAuth(app){
       await set(ref(db, `rooms/${newRoomId}`), {
         createdAt: serverTimestamp(),
         state: "lobby",
-        preStartUntilMs: null,
+        preStartAt: null,
+        preStartDurationMs: null,
         round: 0,
         minRounds: MIN_ROUNDS,
         boardSize: BOARD_SIZE,
@@ -671,7 +683,8 @@ async function ensureAnonAuth(app){
 
     await update(ref(db, `rooms/${roomId}`), {
       state: "playing",
-      preStartUntilMs: null,
+      preStartAt: null,
+      preStartDurationMs: null,
       round: 1,
       roundStartMs: Date.now(),
       lastResult: null,
@@ -684,10 +697,12 @@ async function ensureAnonAuth(app){
       "players/p2/choice": null,
       "players/p1/hand": randomHand(),
       "players/p2/hand": randomHand(),
+      "players/p1/ready": false,
+      "players/p2/ready": false
     });
   }
 
-  /* [13] 退出（rules準拠：p2は上位フィールドを書かない） */
+  /* [13] 退出 */
   async function leaveRoom(){
     try {
       if (btnLeave) btnLeave.disabled = true;
@@ -706,7 +721,6 @@ async function ensureAnonAuth(app){
       if (seat === "p1") {
         await remove(ref(db, `rooms/${roomId}`));
       } else {
-        // p2 は自分のスロットのみクリア（state/round等は触らない）
         const base = `rooms/${roomId}/players/p2`;
         const updates = {};
         updates[`${base}/uid`]      = null;
@@ -717,6 +731,17 @@ async function ensureAnonAuth(app){
         updates[`${base}/hand`]     = randomHand();
         updates[`${base}/joinedAt`] = null;
         updates[`${base}/ready`]    = false;
+
+        if (d.state !== "lobby") {
+          updates[`rooms/${roomId}/state`]            = "lobby";
+          updates[`rooms/${roomId}/round`]            = 0;
+          updates[`rooms/${roomId}/roundStartMs`]     = null;
+          updates[`rooms/${roomId}/lastResult`]       = null;
+          updates[`rooms/${roomId}/revealRound`]      = null;
+          updates[`rooms/${roomId}/revealUntilMs`]    = null;
+          updates[`rooms/${roomId}/preStartAt`]       = null;
+          updates[`rooms/${roomId}/preStartDurationMs`] = null;
+        }
         await update(ref(db), updates);
       }
     } catch (err) {
@@ -748,9 +773,9 @@ async function ensureAnonAuth(app){
     const me = d.players[meSeat];
     const op = d.players[opSeat];
 
-    // 決闘ヘッダ名
-    if (duelMeName) duelMeName.replaceChildren(document.createTextNode(me?.name || "—"));
-    if (duelOpName) duelOpName.replaceChildren(document.createTextNode(op?.name || "—"));
+    // 決闘ヘッダ名（DOM安定手法）
+    document.querySelector('#duelMeName')?.replaceChildren(document.createTextNode(me?.name || '—'));
+    document.querySelector('#duelOpName')?.replaceChildren(document.createTextNode(op?.name || '—'));
 
     // ロビー名
     if (p1Label) p1Label.textContent = d.players.p1?.name || "-";
@@ -807,8 +832,10 @@ async function ensureAnonAuth(app){
         const w = d.lastResult?.winner;
         stateMsg.textContent = w===null ? "🤝 引き分け。もう一回する？" : ( (w===meSeat) ? "🏆 勝利！" : "😢 敗北…" );
       } else if (d.state === "preparing"){
-        const remain = Math.max(0, Math.ceil((d.preStartUntilMs - Date.now())/1000));
-        stateMsg.textContent = `ゲーム開始準備中… ${remain}s`;
+        const at = d.preStartAt || 0;
+        const dur = d.preStartDurationMs || 3000;
+        const left = Math.max(0, Math.ceil(((at + dur) - serverNow())/1000));
+        stateMsg.textContent = `ゲーム開始準備中… ${left}s`;
       } else if (revealing){
         const remain = Math.max(0, Math.ceil((d.revealUntilMs - Date.now())/1000));
         stateMsg.textContent = `判定まで… ${remain}s`;
@@ -827,7 +854,7 @@ async function ensureAnonAuth(app){
 
     // ロビー：両者Readyで p1 が preparing 開始
     if (d.state === "lobby" && seat==="p1" && d.players?.p1?.ready && d.players?.p2?.ready){
-      if (!d.preStartUntilMs){ startPreStartCountdown(); }
+      if (!d.preStartAt){ startPreStartCountdown(); }
     }
 
     // プレイ中のタイマー
@@ -856,12 +883,10 @@ async function ensureAnonAuth(app){
     const opSeat = seat==="p1" ? "p2" : "p1";
     const opUid = d.players?.[opSeat]?.uid || null;
 
-    // 初回は基準だけ更新（誤検知防止）
     if (prevOpUid === null){
       prevOpUid = opUid;
       return;
     }
-    // 在席→不在に変わった時だけ通知・処理
     if (prevOpUid && !opUid){
       prevOpUid = opUid;
       alert("相手が退室しました。");
@@ -1027,7 +1052,7 @@ async function ensureAnonAuth(app){
     return { type:"timeout", winner:winnerSeat, delta:{p1:0,p2:0} };
   }
 
-  /* [19] 判定（バリア判定バグ修正済） */
+  /* [19] 判定（Barrier条件バグ修正済み） */
   function judgeRound(p1, p2){
     const a = p1.choice, b = p2.choice;
 
@@ -1260,16 +1285,19 @@ async function ensureAnonAuth(app){
     setTimeout(()=>{ countdownOverlayEl.style.display = "none"; }, 180);
   }
 
-  /* === Reveal & Prestart pollers（一本化） === */
+  // === ポーラー（pre-start & reveal） ===
   function ensurePollers(){
     if (!countdownTicker){
       countdownTicker = setInterval(async ()=>{
         if (!curRoom) return;
 
-        // preStart（ロビーの3,2,1）
+        // preStart（ロビーの3,2,1） — サーバ時刻基準
         if (curRoom.state==="preparing"){
-          const left = Math.ceil((curRoom.preStartUntilMs - Date.now())/1000);
-          if (left > 0){
+          const at = curRoom.preStartAt || 0;
+          const dur = curRoom.preStartDurationMs || 3000;
+          const leftMs = (at + dur) - serverNow();
+          if (leftMs > 0){
+            const left = Math.ceil(leftMs/1000);
             showCountdownOverlay(left);
           }else{
             showCountdownOverlay("ゲームスタート！", { fontSize: 36 });
@@ -1320,6 +1348,10 @@ async function ensureAnonAuth(app){
       }, 200);
     }
   }
+  function clearPollers(){
+    if (countdownTicker){ clearInterval(countdownTicker); countdownTicker=null; }
+    if (revealApplyPoller){ clearInterval(revealApplyPoller); revealApplyPoller=null; }
+  }
 
   /* === 再戦 === */
   function showRematchOverlay(d){
@@ -1364,7 +1396,8 @@ async function ensureAnonAuth(app){
   async function startNewMatch(){
     await update(ref(db, `rooms/${roomId}`), {
       state: "playing",
-      preStartUntilMs: null,
+      preStartAt: null,
+      preStartDurationMs: null,
       round: 1,
       boardSize: BOARD_SIZE,
       roundStartMs: Date.now(),
@@ -1449,18 +1482,29 @@ async function ensureAnonAuth(app){
     return "—";
   }
 
-  /* ====== スタンプ：UI & DB同期 ====== */
+  /* ====== スタンプ：UI & DB同期（既存 #btnStamp を確実に使用） ====== */
   function ensureStampButton(){
     if (btnStamp) return btnStamp;
+    let el = document.getElementById('btnStamp');
+    if (el){
+      btnStamp = el;
+      if (!btnStamp._stampBound){
+        btnStamp.addEventListener('click', toggleStampUI, { passive: true });
+        btnStamp._stampBound = true;
+      }
+      return btnStamp;
+    }
     const row = btnClear?.parentElement || btnPlay?.parentElement;
     if (!row) return null;
-    btnStamp = document.createElement('button');
-    btnStamp.id = 'btnStamp';
-    btnStamp.className = 'ghost';
-    btnStamp.textContent = 'スタンプ';
-    btnStamp.style.marginLeft = '6px';
-    btnStamp.addEventListener('click', toggleStampUI);
-    row.appendChild(btnStamp);
+    el = document.createElement('button');
+    el.id = 'btnStamp';
+    el.className = 'ghost';
+    el.textContent = 'スタンプ';
+    el.style.marginLeft = '6px';
+    el.addEventListener('click', toggleStampUI, { passive: true });
+    row.appendChild(el);
+    btnStamp = el;
+    btnStamp._stampBound = true;
     return btnStamp;
   }
   function ensureStampUI(){
@@ -1560,9 +1604,7 @@ async function ensureAnonAuth(app){
     emoteTimers[k] = setTimeout(()=>{}, duration);
   }
 
-  /* === Pollers は上で一本化 === */
-
-  /* === 再戦 UI 関連は上に実装済み === */
+  // === Pollers（上で定義済み） ===
 
   /* === 接続確認 === */
   function waitForConnected(db, timeoutMs = 10000){
